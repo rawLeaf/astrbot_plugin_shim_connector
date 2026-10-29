@@ -1,0 +1,88 @@
+{
+  "workbuddy": {
+    "description": "WorkBuddy 接入",
+    "type": "object",
+    "hint": "需要本机安装 WorkBuddy 桌面端并已登录。凭据由 shim 从桌面端读取并解密，插件不接触任何 token。",
+    "items": {
+      "enable": {
+        "description": "启用",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后插件启动时自动拉起该 shim"
+      },
+      "port": {
+        "description": "端口",
+        "type": "int",
+        "default": 8787
+      },
+      "token": {
+        "description": "占位 Token",
+        "type": "string",
+        "default": "sk-workbuddy-local",
+        "hint": "下游连接 shim 时用的 Bearer，不是你的真实账号密钥"
+      }
+    }
+  },
+  "trae": {
+    "description": "Trae 接入",
+    "type": "object",
+    "hint": "需要本机安装 Trae 桌面端并已登录。需设置环境变量 TRAE_AUTH_FILE 指向已解密的 auth JSON。",
+    "items": {
+      "enable": {
+        "description": "启用",
+        "type": "bool",
+        "default": true
+      },
+      "port": {
+        "description": "端口",
+        "type": "int",
+        "default": 8788
+      },
+      "token": {
+        "description": "占位 Token",
+        "type": "string",
+        "default": "sk-trae-local"
+      }
+    }
+  },
+  "qoder": {
+    "description": "Qoder 接入",
+    "type": "object",
+    "hint": "需要本机安装 Qoder 桌面端并已登录。凭据由 shim 从桌面端 auth.v1.dat 解密。",
+    "items": {
+      "enable": {
+        "description": "启用",
+        "type": "bool",
+        "default": false
+      },
+      "port": {
+        "description": "端口",
+        "type": "int",
+        "default": 8789
+      },
+      "token": {
+        "description": "占位 Token",
+        "type": "string",
+        "default": "sk-qoder-local"
+      }
+    }
+  },
+  "advanced": {
+    "description": "高级设置",
+    "type": "object",
+    "items": {
+      "node_path": {
+        "description": "Node.js 路径",
+        "type": "string",
+        "default": "",
+        "hint": "留空则自动从 PATH 查找"
+      },
+      "auto_register": {
+        "description": "自动注册 Provider",
+        "type": "bool",
+        "default": true,
+        "hint": "shim 起来后自动把模型加进 AstrBot，无需手动配 provider_source"
+      }
+    }
+  }
+}

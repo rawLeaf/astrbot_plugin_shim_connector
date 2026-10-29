@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+*.log
+*.bak
+.venv/
+trae-auth.json
+.trae-auth*.json
+auth.v1.dat
+.env
