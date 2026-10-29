@@ -1,26 +1,51 @@
 name: "astrbot_plugin_shim_connector"
 display_name: "本机模型接入 (Shim Connector)"
+short_desc: "把本机已登录的 WorkBuddy / Trae / Qoder 变成 AstrBot 的模型源，装完即用。"
 author: "rawLeaf"
 description: >-
-  把本机已登录的 AI 客户端（Qoder / Trae / WorkBuddy 国内+国际）通过 loopback shim 接入 AstrBot。
-  另含视觉轮换层（vision）和通用 LLM 池（llm-pool）。
-  插件负责起停 shim 进程、自动注册 provider_source + provider、写 shim 日志到文件并在面板里显示运行状态。
-  装完即可用：凭据从各客户端桌面端自动读取并解密，无需手动配置。
+  把本机已登录的 AI 客户端（WorkBuddy / Trae / Qoder）通过 loopback shim 接入 AstrBot。
+
+  插件自动起停 shim 子进程、探测 /v1/models 并注册成 provider，日志落盘可查。
+
+  零配置：凭据由各 shim 从客户端桌面端本地存储自动读取并解密，无需填写任何 token 或路径。
+
+  另含视觉轮换层（vision）与通用 LLM 池（llm-pool），供只能填单个 provider 的配置点使用。
 version: "1.2.0"
 repo: "https://github.com/rawLeaf/astrbot_plugin_shim_connector"
-astrbot_version: ">=4.11.0"
+homepage: "https://github.com/rawLeaf/astrbot_plugin_shim_connector"
 license: "MIT"
+astrbot_version: ">=4.11.0"
+support_platforms:
+  - aiocqhttp
+  - telegram
+  - discord
+  - slack
+  - lark
+  - dingtalk
+  - kook
+  - matrix
+  - misskey
+  - satori
 tags:
   - "模型接入"
   - "本地模型"
   - "shim"
-  - "Qoder"
-  - "Trae"
   - "WorkBuddy"
+  - "Trae"
+  - "Qoder"
+  - "OpenAI兼容"
 keywords:
   - shim
-  - qoder
-  - trae
   - workbuddy
+  - trae
+  - qoder
   - local-model
   - openai-compatible
+  - provider
+features:
+  - "零配置：凭据从客户端桌面端自动读取"
+  - "自动起停 shim 子进程"
+  - "自动探测模型并注册 provider"
+  - "shim 日志落盘 + /shim logs 命令"
+  - "支持 WorkBuddy / Trae / Qoder 三家"
+  - "视觉轮换层与通用 LLM 池（可选）"

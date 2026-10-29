@@ -1,1 +1,7 @@
-# 无额外依赖（仅用标准库 + astrbot 平台自带）
+# 本插件只用 AstrBot 自带的依赖，无需额外安装。
+#
+# 说明：
+# - aiohttp 是 AstrBot 核心依赖（用于所有 HTTP 请求），插件可直接 import。
+# - 若你的部署方式缺少它（极少见），手动执行：
+#     pip install aiohttp>=3.8.0
+aiohttp>=3.8.0

@@ -14,6 +14,8 @@ shim 本身是 scripts/ 下的 Node 脚本，凭据从本机登录态读取，�
 from __future__ import annotations
 
 import asyncio
+
+import aiohttp
 import json
 import os
 import shutil
@@ -529,13 +531,19 @@ class ShimConnector(Star):
         Returns:
             模型 id 列表，失败时为空。
         """
-        import urllib.request
-
         url = f"http://127.0.0.1:{port}/v1/models"
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+        timeout = aiohttp.ClientTimeout(total=30)
         try:
-            with urllib.request.urlopen(req, timeout=5) as resp:  # noqa: S310
-                doc = json.loads(resp.read().decode("utf-8"))
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(
+                    url, headers={"Authorization": f"Bearer {token}"}
+                ) as resp:
+                    if resp.status != 200:
+                        logger.warning(
+                            f"[shim_connector] :{port}/v1/models 返回 HTTP {resp.status}"
+                        )
+                        return []
+                    doc = await resp.json()
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[shim_connector] 读取 :{port}/v1/models 失败: {exc}")
             return []

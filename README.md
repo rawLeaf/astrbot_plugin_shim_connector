@@ -1,5 +1,7 @@
 # astrbot_plugin_shim_connector
 
+> 把本机已登录的 **WorkBuddy / Trae / Qoder** 变成 AstrBot 的模型源。**装完即用，零配置。**
+
 > 把本机已登录的 AI 客户端（Qoder / Trae / WorkBuddy 国内+国际）通过 loopback shim 接入 AstrBot。
 > 另含视觉轮换层与通用 LLM 池。
 
@@ -226,3 +228,22 @@ WorkBuddy 凭据解密逻辑改写自 [dsh-connect-workbuddy](https://github.com
 - 6 个 shim（含 WorkBuddy 国际版、视觉轮换、LLM 池）
 - shim 日志落盘 + `/shim logs` 命令
 - provider 注册用 AstrBot 原生两层结构（`<source_id>/<model>`）
+
+
+---
+
+## 灵感来源与许可
+
+本插件的三个 shim 移植/改写了以下 MIT 项目的实现思路与代码：
+
+| 项目 | 用途 | 许可 |
+|---|---|---|
+| [dsh-connect-workbuddy](https://github.com/dingminhua/dsh-connect-workbuddy) | WorkBuddy at-rest 凭据解密、app 发现 | MIT, Copyright (c) 2026 LaoDing |
+| [dsh-workbuddy-connect](https://github.com/corrinehu/dsh-workbuddy-connect) | 上述项目的上游参考 | MIT, Copyright (c) 2026 Corrine Hu |
+| [dsh-connect-trae](https://github.com/dingminhua/dsh-connect-trae) | Trae storage.json 凭据解密 | MIT, Copyright (c) 2026 LaoDing |
+
+完整许可声明见：
+- `shims/workbuddy-shim.mjs` 末尾的 `LICENSE-NOTICE`
+- `shims/trae-shim.mjs` 中的解密模块注释
+
+本插件自身以 **MIT** 许可发布。
