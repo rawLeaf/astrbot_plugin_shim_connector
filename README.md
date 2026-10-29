@@ -179,3 +179,15 @@ WorkBuddy 凭据解密逻辑改写自 [dsh-connect-workbuddy](https://github.com
 ## 免责
 
 本插件复用已登录客户端的私有协议，可能违反对方服务条款。请自行评估风险。
+
+---
+
+## 变更日志
+
+各版本改了什么见 [CHANGELOG.md](CHANGELOG.md)。
+
+当前版本 **1.1.1**，要点：
+
+- 6 个 shim（含 WorkBuddy 国际版、视觉轮换、LLM 池）
+- shim 日志落盘 + `/shim logs` 命令
+- provider 注册用 AstrBot 原生两层结构（`<source_id>/<model>`）
