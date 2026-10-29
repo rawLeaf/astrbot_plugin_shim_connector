@@ -397,8 +397,13 @@ async function resolveCredential() {
     let entries = [];
     try { entries = readdirSync(dir); } catch { continue; }
     for (const name of entries) {
-      // 只认 workbuddy-desktop.info 和带时间戳的备份
-      if (!/^workbuddy-desktop(\.[\w-]+)?\.info$/.test(name)) continue;
+      // 只认 workbuddy-desktop.info / workbuddy-desktop-ai.info 及其带时间戳的备份
+      //
+      // 2026-10-29 修复：原正则 /^workbuddy-desktop(\.[\w-]+)?\.info$/ 里
+      // (\.[\w-]+)? 要求后缀以「.」开头，而国际版文件名是
+      // workbuddy-desktop-ai.info（以「-」开头），匹配不上。
+      // 结果国际版 shim 永远读到国内版的旧凭据 -> 上游 401。
+      if (!/^workbuddy-desktop(-[\w-]+)?(\.[\w-]+)?\.info$/.test(name)) continue;
       files.push(join(dir, name));
     }
   }
@@ -407,10 +412,20 @@ async function resolveCredential() {
       "\n  WorkBuddy must be installed and signed in.");
   }
 
-  // 优先 live 文件，其次按修改时间倒序
+  // 🆕 2026-10-29：按区域挑选对应的 live 文件。
+  //
+  // 国内版（region=cn）  -> workbuddy-desktop.info
+  // 国际版（region=global）-> workbuddy-desktop-ai.info
+  //
+  // 不区分的话，两个文件都会被读，国内版会抢到国际版凭据（或反之）。
+  const regionLive = REGION === "global"
+    ? "workbuddy-desktop-ai.info"
+    : WORKBUDDY_LIVE_FILENAME;
+
+  // 优先本区域的 live 文件，其次按修改时间倒序
   files.sort((a, b) => {
-    const la = basename(a) === WORKBUDDY_LIVE_FILENAME ? 0 : 1;
-    const lb = basename(b) === WORKBUDDY_LIVE_FILENAME ? 0 : 1;
+    const la = basename(a) === regionLive ? 0 : 1;
+    const lb = basename(b) === regionLive ? 0 : 1;
     if (la !== lb) return la - lb;
     try { return statSync(b).mtimeMs - statSync(a).mtimeMs; } catch { return 0; }
   });
