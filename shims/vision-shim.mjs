@@ -17,12 +17,21 @@
 
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 
 const PORT = Number(process.env.VISION_SHIM_PORT ?? 8791);
 const TOKEN = process.env.VISION_SHIM_TOKEN ?? "sk-vision-local";
 const HOST = "127.0.0.1";
-const CONFIG_FILE = process.env.ASTRBOT_CONFIG ?? "D:\\4game\\ai\\robot\\core\\data\\cmd_config.json";
+const CONFIG_FILE = process.env.ASTRBOT_CONFIG || "cmd_config.json";
+
+// 启动时若配置文件不存在，明确告知而不是静默失败
+if (!existsSync(CONFIG_FILE)) {
+  console.error(
+    "[vision-shim] 找不到 AstrBot 配置: " + CONFIG_FILE + "\n" +
+    "  请用 ASTRBOT_CONFIG 环境变量指向你的 cmd_config.json"
+  );
+  process.exit(2);
+}
 
 const VIRTUAL_MODEL = "vision-auto";
 

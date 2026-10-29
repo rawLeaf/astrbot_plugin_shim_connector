@@ -15,7 +15,9 @@
 
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 
@@ -23,13 +25,19 @@ const PORT = Number(process.env.QODER_SHIM_PORT ?? 8789);
 const TOKEN = process.env.QODER_SHIM_TOKEN ?? "sk-qoder-local";
 const HOST = "127.0.0.1";
 
+/** APPDATA 可能为空（服务账户、精简环境），用 homedir 兜底。 */
+function roamingDir(sub) {
+  const base = process.env.APPDATA || join(homedir(), "AppData", "Roaming");
+  return join(base, sub);
+}
+
 const REGIONS = {
   "qoder-cn": {
-    dir: process.env.QODER_REGION_DIR_CN || ((process.env.APPDATA || "") + "\\com.qodercn.app.stable"),
+    dir: process.env.QODER_REGION_DIR_CN || roamingDir("com.qodercn.app.stable"),
     baseUrl: "https://gateway.qoder.com.cn/",
   },
   qoder: {
-    dir: process.env.QODER_REGION_DIR_GLOBAL || ((process.env.APPDATA || "") + "\\com.qoder.app.stable"),
+    dir: process.env.QODER_REGION_DIR_GLOBAL || roamingDir("com.qoder.app.stable"),
     baseUrl: "https://api3.qoder.sh/",
   },
 };
@@ -60,7 +68,11 @@ function loadCredential(regionId) {
     env: { ...process.env, QD_APP_DIR: r.dir },
   });
   const keyB64 = (ps.stdout || "").trim();
-  if (keyB64.length === 0) throw new Error("无法解出 Qoder OSCrypt 主密钥: " + regionId);
+  if (keyB64.length === 0) throw new Error(
+      "无法解出 Qoder OSCrypt 主密钥: " + regionId +
+      "\n  查找目录: " + r.dir +
+      "\n  该目录存在: " + existsSync(r.dir)
+    );
   const key = Buffer.from(keyB64, "base64");
   const blob = readFileSync(r.dir + "\\auth.v1.dat");
   const b = blob.subarray(3);
