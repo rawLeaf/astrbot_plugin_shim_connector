@@ -7,14 +7,33 @@
 
 ---
 
-## [1.2.0] — 2026-10-29
+## [1.2.1] — 2026-10-29
 
 ### 文档
 
-- README 重写：把「**白嫖**」这个核心价值放到最前面——
-  复用已付费订阅、零 API 费用、36 个模型、零配置。
-- metadata.yaml 的 display_name / short_desc / description / features 同步强调这一点。
+- **README / metadata.yaml / SKILL.md 重写开头，突出「白嫖」这个核心价值**：
+  - 一句话点明：把你付过钱的订阅变成机器人的模型源，不用再付 API 费
+  - 拆解「白嫖的是什么」：WorkBuddy 6 + Trae 6 + Qoder 24 = 36 个模型
+  - 说清为什么是白嫖不是破解：钱已付过，只是换入口
+  - 成本对比：按 token 付费 vs 边际成本 0
+  - 核心卖点速览表
+- `display_name` 改为「白嫖机器人 | 本机模型接入」。
+- `short_desc` / `description` / `features` 同步强调零 API 费用与零配置。
+- SKILL.md 的触发词新增「白嫖」「免费模型」「零成本」。
 
+### 修复
+
+- 网络请求从 `urllib`（同步阻塞）改为 **aiohttp**（异步）。
+  Qoder 的 `/v1/models` 需 10s+，原来会阻塞 AstrBot 事件循环。
+- 补齐 AstrBot 官方规范的 `metadata.yaml` 字段：`short_desc` / `support_platforms` /
+  `homepage` / `features`。
+- 新增 `logo.png`（256×256）。
+- `requirements.txt` 显式声明 `aiohttp`。
+- 清理误建的 `shims/%SystemDrive%` 空目录。
+
+---
+
+## [1.2.0] — 2026-10-29
 
 ### 新增
 
@@ -131,7 +150,8 @@ Trae 实测真实对话返回正常（`DeepSeek-V4-Flash-Official`）。
 
 | 版本 | commit | 要点 |
 |---|---|---|
-| 1.2.0 | 待定 | 零配置开箱即用；Trae 凭据自动发现 |
+| 1.2.1 | 待定 | 文档突出「白嫖」；改 aiohttp 异步；对齐官方规范 |
+| 1.2.0 | `2592fc5` | 零配置开箱即用；Trae 凭据自动发现 |
 | 1.1.1 | `8159e9c` | 修 Qoder APPDATA 兜底、去掉硬编码本机路径 |
 | 1.1.0 | `08d02da` | 6 个 shim、日志落盘、`/shim logs` |
 | 1.0.0 | `4456c4d` | 首个版本，3 个 shim |
