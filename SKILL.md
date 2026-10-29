@@ -1,15 +1,29 @@
 ---
 name: astrbot-shim-connector
-description: 部署、配置和排查 AstrBot 的「本机模型接入」插件（astrbot_plugin_shim_connector v1.1.0+）。当用户要装这个插件、把 Qoder/Trae/WorkBuddy（国内+国际）的模型接进机器人、接入视觉轮换层或 LLM 池、问为什么 shim 起不来、provider 没注册、模型返回空、端口冲突、`/shim` 或 `/shim logs` 命令怎么用、凭据读不到、shim 日志在哪，或需要判断问题出在插件层/shim 层/provider 层时使用。触发词：shim_connector、本机模型接入、shim、WorkBuddy 接入、Trae 接入、Qoder 接入、vision-shim、llm-pool、provider 没注册、shim 起不来、模型返回空、8787、8788、8789、8790、8791、8792、/shim 命令、shim 日志。
+description: 白嫖机器人：把已付费的 WorkBuddy / Trae / Qoder 订阅变成 AstrBot 的模型源（36 个模型，零 API 费用、零配置）。当用户要把本机客户端的模型接进机器人、问怎么不花 API 钱让机器人跑起来、装了这个插件、shim 起不来、provider 没注册、模型返回空、端口冲突、/shim 命令怎么用、凭据读不到，或需要判断问题出在插件层/shim 层/provider 层时使用。触发词：shim_connector、白嫖、本机模型接入、免费模型、零成本、WorkBuddy 接入、Trae 接入、Qoder 接入、provider 没注册、shim 起不来、模型返回空、8787、8788、8789、/shim 命令。
 ---
 
-# AstrBot 本机模型接入插件
+# 白嫖机器人 | AstrBot 本机模型接入插件
 
 把 Qoder / Trae / WorkBuddy（国内 + 国际）这些本机已登录的客户端，
 连同视觉轮换层和 LLM 池，通过 loopback shim 变成 AstrBot 可用的模型源。
 
 **仓库**：https://github.com/rawLeaf/astrbot_plugin_shim_connector
-**当前版本**：v1.1.0（2026-10-29）
+**当前版本**：v1.2.0（2026-10-29）
+
+---
+
+## 它解决什么
+
+**一句话：把你已经付过钱的 AI 订阅，变成机器人能用的模型。**
+
+你在机器上登录了 WorkBuddy / Trae / Qoder，这些客户端每月在扣钱。
+但它们不发 API Key，所以机器人调用时你还得再付一次 API 费用。
+
+这个插件在本机起一组 shim，把「客户端已登录的额度」翻译成 OpenAI 兼容端点，
+机器人直接调用——**边际成本 0，钱你已经付过了。**
+
+合计 36 个模型：WorkBuddy 6 + Trae 6 + Qoder 24。
 
 ---
 

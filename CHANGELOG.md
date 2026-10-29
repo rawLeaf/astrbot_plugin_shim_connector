@@ -9,6 +9,13 @@
 
 ## [1.2.0] — 2026-10-29
 
+### 文档
+
+- README 重写：把「**白嫖**」这个核心价值放到最前面——
+  复用已付费订阅、零 API 费用、36 个模型、零配置。
+- metadata.yaml 的 display_name / short_desc / description / features 同步强调这一点。
+
+
 ### 新增
 
 - **零配置开箱即用**。装完插件即自动可用，不需要填任何 token、路径或密钥。

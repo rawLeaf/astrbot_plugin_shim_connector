@@ -1,15 +1,18 @@
 name: "astrbot_plugin_shim_connector"
-display_name: "本机模型接入 (Shim Connector)"
-short_desc: "把本机已登录的 WorkBuddy / Trae / Qoder 变成 AstrBot 的模型源，装完即用。"
+display_name: "白嫖机器人 | 本机模型接入"
+short_desc: "把你已付费的 WorkBuddy / Trae / Qoder 订阅变成机器人模型源，36 个模型，零 API 费用、零配置。"
 author: "rawLeaf"
 description: >-
-  把本机已登录的 AI 客户端（WorkBuddy / Trae / Qoder）通过 loopback shim 接入 AstrBot。
+  白嫖机器人：把你已经付过钱的 AI 订阅（WorkBuddy / Trae / Qoder）直接变成 AstrBot 的模型源。
 
-  插件自动起停 shim 子进程、探测 /v1/models 并注册成 provider，日志落盘可查。
+  这些客户端不提供 API Key，所以以前用机器人还得再付一次 API 费用。本插件在本机起 loopback shim，
+  把已有订阅额度翻译成 OpenAI 兼容端点，自动注册成 AstrBot 的 provider。
 
-  零配置：凭据由各 shim 从客户端桌面端本地存储自动读取并解密，无需填写任何 token 或路径。
+  边际成本 0：钱你已经付过了，只是换个入口给机器人用。合计 36 个可用模型。
 
-  另含视觉轮换层（vision）与通用 LLM 池（llm-pool），供只能填单个 provider 的配置点使用。
+  零配置：凭据从各客户端桌面端本地存储自动读取并解密，不填任何 token 或路径。
+
+  另含视觉轮换层（5 上游）和通用 LLM 池（10 上游），自动切换兜底。
 version: "1.2.0"
 repo: "https://github.com/rawLeaf/astrbot_plugin_shim_connector"
 homepage: "https://github.com/rawLeaf/astrbot_plugin_shim_connector"
@@ -27,13 +30,13 @@ support_platforms:
   - misskey
   - satori
 tags:
+  - "白嫖"
   - "模型接入"
   - "本地模型"
-  - "shim"
+  - "省钱"
   - "WorkBuddy"
   - "Trae"
   - "Qoder"
-  - "OpenAI兼容"
 keywords:
   - shim
   - workbuddy
@@ -41,11 +44,14 @@ keywords:
   - qoder
   - local-model
   - openai-compatible
-  - provider
+  - zero-cost
+  - free
 features:
-  - "零配置：凭据从客户端桌面端自动读取"
+  - "零 API 费用：复用已有订阅额度，边际成本 0"
+  - "零配置：凭据从客户端桌面端自动读取解密"
+  - "36 个模型：WorkBuddy 6 + Trae 6 + Qoder 24"
   - "自动起停 shim 子进程"
   - "自动探测模型并注册 provider"
   - "shim 日志落盘 + /shim logs 命令"
-  - "支持 WorkBuddy / Trae / Qoder 三家"
-  - "视觉轮换层与通用 LLM 池（可选）"
+  - "视觉轮换层（5 上游）和通用 LLM 池（10 上游）"
+  - "只绑 127.0.0.1，不暴露外网"
