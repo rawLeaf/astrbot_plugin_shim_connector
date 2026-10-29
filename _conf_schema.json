@@ -67,6 +67,72 @@
       }
     }
   },
+  "workbuddy_intl": {
+    "description": "WorkBuddy 国际版接入",
+    "type": "object",
+    "hint": "与国内版共用同一个 shim 脚本，靠 WB_REGION=global 区分。需要国际版客户端已登录。",
+    "items": {
+      "enable": {
+        "description": "启用",
+        "type": "bool",
+        "default": false
+      },
+      "port": {
+        "description": "端口",
+        "type": "int",
+        "default": 8790
+      },
+      "token": {
+        "description": "占位 Token",
+        "type": "string",
+        "default": "sk-workbuddy-intl"
+      }
+    }
+  },
+  "vision": {
+    "description": "视觉模型轮换层",
+    "type": "object",
+    "hint": "vision-shim.mjs：把多个视觉上游轮起来，供 image_to_text / 视频抽帧使用。",
+    "items": {
+      "enable": {
+        "description": "启用",
+        "type": "bool",
+        "default": false
+      },
+      "port": {
+        "description": "端口",
+        "type": "int",
+        "default": 8791
+      },
+      "token": {
+        "description": "占位 Token",
+        "type": "string",
+        "default": "sk-vision-local"
+      }
+    }
+  },
+  "llm_pool": {
+    "description": "通用 LLM 池",
+    "type": "object",
+    "hint": "llm-pool-shim.mjs：把多个文本上游轮起来，供插件内部固定单 provider 的场景使用（self_learning / qzone / 决策AI）。全部 429 时才有意义。",
+    "items": {
+      "enable": {
+        "description": "启用",
+        "type": "bool",
+        "default": false
+      },
+      "port": {
+        "description": "端口",
+        "type": "int",
+        "default": 8792
+      },
+      "token": {
+        "description": "占位 Token",
+        "type": "string",
+        "default": "sk-llm-pool-local"
+      }
+    }
+  },
   "advanced": {
     "description": "高级设置",
     "type": "object",

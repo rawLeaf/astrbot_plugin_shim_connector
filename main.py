@@ -20,7 +20,9 @@ import shutil
 import socket
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
+from typing import ClassVar
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -30,7 +32,16 @@ from astrbot.core import AstrBotConfig
 PLUGIN_DIR = Path(__file__).parent
 SHIM_DIR = PLUGIN_DIR / "shims"
 
+# 单个 shim 日志超过这个大小就滚动
+MAX_LOG_BYTES = 2 * 1024 * 1024
+# /shim logs 单次最多输出多少行
+MAX_LOG_TAIL_LINES = 200
+
 # 每个 shim 的默认配置。端口与 token 可在 _conf_schema.json 里改。
+#
+# 2026-10-29 扩展：新增 workbuddy_intl / vision / llm_pool。
+# - workbuddy_intl 用同一个 workbuddy-shim.mjs，靠 WB_REGION=global 区分
+# - vision / llm_pool 是轮换层，source_id 前缀分别是 vision_rotator / llm_pool
 SHIM_DEFS: dict[str, dict] = {
     "workbuddy": {
         "script": "workbuddy-shim.mjs",
@@ -38,6 +49,8 @@ SHIM_DEFS: dict[str, dict] = {
         "token": "sk-workbuddy-local",
         "label": "WorkBuddy",
         "env_prefix": "WB_SHIM",
+        "source_id": "workbuddy_shim",
+        "extra_env": {"WB_REGION": "cn"},
     },
     "trae": {
         "script": "trae-shim.mjs",
@@ -45,6 +58,8 @@ SHIM_DEFS: dict[str, dict] = {
         "token": "sk-trae-local",
         "label": "Trae",
         "env_prefix": "TRAE_SHIM",
+        "source_id": "trae_shim",
+        "extra_env": {},
     },
     "qoder": {
         "script": "qoder-shim.mjs",
@@ -52,6 +67,38 @@ SHIM_DEFS: dict[str, dict] = {
         "token": "sk-qoder-local",
         "label": "Qoder",
         "env_prefix": "QODER_SHIM",
+        "source_id": "qoder_shim",
+        "extra_env": {},
+    },
+    # 国际版 WorkBuddy：同一个脚本，WB_REGION=global
+    "workbuddy_intl": {
+        "script": "workbuddy-shim.mjs",
+        "port": 8790,
+        "token": "sk-workbuddy-intl",
+        "label": "WorkBuddy-Intl",
+        "env_prefix": "WB_SHIM",
+        "source_id": "workbuddy_intl",
+        "extra_env": {"WB_REGION": "global"},
+    },
+    # 视觉轮换层（5 个上游轮换，见 vision-shim.mjs）
+    "vision": {
+        "script": "vision-shim.mjs",
+        "port": 8791,
+        "token": "sk-vision-local",
+        "label": "Vision",
+        "env_prefix": "VISION_SHIM",
+        "source_id": "vision_rotator",
+        "extra_env": {},
+    },
+    # 通用 LLM 池（10 个上游轮换，见 llm-pool-shim.mjs）
+    "llm_pool": {
+        "script": "llm-pool-shim.mjs",
+        "port": 8792,
+        "token": "sk-llm-pool-local",
+        "label": "LLM-Pool",
+        "env_prefix": "LLM_POOL",
+        "source_id": "llm_pool",
+        "extra_env": {},
     },
 }
 
@@ -194,73 +241,281 @@ class ShimConnector(Star):
         env = os.environ.copy()
         env[f"{spec['env_prefix']}_PORT"] = str(port)
         env[f"{spec['env_prefix']}_TOKEN"] = self._token(name)
+        # 该 shim 需要的额外环境变量（如 WB_REGION）
+        for ek, ev in (spec.get("extra_env") or {}).items():
+            env[ek] = str(ev)
         env.setdefault("PYTHONIOENCODING", "utf-8")
         env.setdefault("PYTHONUTF8", "1")
+        # vision / llm-pool 需要读 AstrBot 配置来发现上游 provider
+        try:
+            env.setdefault("ASTRBOT_CONFIG", str(self._astrbot_config_path()))
+        except Exception:  # noqa: BLE001
+            pass
+
+        log_path = self._log_path(name)
+        try:
+            self._rotate_log(log_path)
+            with open(log_path, "ab") as fh:
+                stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                fh.write(
+                    f"\n===== {stamp} 启动 {name} (:{port}) =====\n".encode("utf-8")
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[shim_connector] 无法写日志头 {log_path}: {exc}")
 
         try:
             creation = 0
             if sys.platform == "win32":
                 creation = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            proc = subprocess.Popen(
-                [node, str(script)],
-                cwd=str(script.parent),
-                env=env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=creation,
-            )
+            # 输出写文件而不是 DEVNULL，这样出问题能回溯
+            log_file = open(log_path, "ab", buffering=0)  # noqa: SIM115
+            try:
+                proc = subprocess.Popen(
+                    [node, str(script)],
+                    cwd=str(script.parent),
+                    env=env,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    creationflags=creation,
+                )
+            finally:
+                log_file.close()  # 父进程关句柄，子进程仍持有
             self.procs[name] = proc
-            logger.info(f"[shim_connector] 已启动 {name} (:{port}) pid={proc.pid}")
+            logger.info(
+                f"[shim_connector] 已启动 {name} (:{port}) pid={proc.pid} "
+                f"log={log_path.name}"
+            )
+            # 2.5 秒后检查是否秒退，把原因写进插件日志
+            asyncio.create_task(self._check_started(name, proc, log_path))
             return True
         except Exception as exc:  # noqa: BLE001
             logger.error(f"[shim_connector] 启动 {name} 失败: {exc}")
             return False
 
+    def _astrbot_config_path(self) -> Path:
+        """推断 AstrBot 数据目录下的 cmd_config.json 路径。"""
+        try:
+            conf = self.context.astrbot_config_mgr.default_conf
+            p = getattr(conf, "config_path", None)
+            if p:
+                return Path(p)
+        except Exception:  # noqa: BLE001
+            pass
+        # 兜底：插件在 <AstrBot>/data/plugins/<name>，往上两级是 data/
+        return PLUGIN_DIR.parent.parent / "cmd_config.json"
+
+    def _log_dir(self) -> Path:
+        """日志目录：优先 plugin_data，其次插件目录下 logs/。"""
+        base = PLUGIN_DIR.parent.parent / "plugin_data" / PLUGIN_DIR.name
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+            return base
+        except Exception:  # noqa: BLE001
+            fb = PLUGIN_DIR / "logs"
+            fb.mkdir(parents=True, exist_ok=True)
+            return fb
+
+    def _log_path(self, name: str) -> Path:
+        """某个 shim 的日志文件路径。"""
+        return self._log_dir() / f"{name}.log"
+
+    def _rotate_log(self, log_path: Path) -> None:
+        """超过阈值就改名成 .1（覆盖旧备份）。"""
+        try:
+            if log_path.exists() and log_path.stat().st_size > MAX_LOG_BYTES:
+                backup = log_path.with_suffix(".log.1")
+                if backup.exists():
+                    backup.unlink()
+                log_path.rename(backup)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[shim_connector] 日志滚动失败 {log_path}: {exc}")
+
+    async def _check_started(
+        self, name: str, proc: subprocess.Popen, log_path: Path
+    ) -> None:
+        """启动后 2.5 秒检查是否秒退，把日志尾部打进插件日志。"""
+        await asyncio.sleep(2.5)
+        if proc.poll() is None:
+            return
+        tail = self._tail(log_path, 15)
+        logger.error(
+            f"[shim_connector] {name} 启动后立即退出 (code={proc.returncode})\n{tail}"
+        )
+
+    @staticmethod
+    def _tail(path: Path, lines: int) -> str:
+        """读文件尾部若干行。"""
+        try:
+            if not path.exists():
+                return "(无日志)"
+            with open(path, "rb") as fh:
+                fh.seek(0, os.SEEK_END)
+                size = fh.tell()
+                block = min(size, 64 * 1024)
+                fh.seek(size - block)
+                raw = fh.read()
+            text = raw.decode("utf-8", errors="replace")
+            return "\n".join(text.splitlines()[-lines:])
+        except Exception as exc:  # noqa: BLE001
+            return f"(读取失败: {exc})"
+
     # ── Provider 注册 ───────────────────────────────────────────
 
-    async def _register_provider(self, name: str) -> None:
-        """把该 shim 注册成 AstrBot 的模型 provider。"""
+    async def _ensure_provider_source(self, name: str) -> str | None:
+        """确保该 shim 的 provider_source 存在，返回 source_id。
+
+        采用 AstrBot 原生结构：provider_sources 里放一个共享凭据/地址的 source，
+        provider 里每个模型挂一个条目并带 provider_source_id，
+        这样最终 provider id 就是 "<source_id>/<model>"，
+        和主链里 workbuddy_shim/space-bunny 这种写法完全一致。
+
+        Returns:
+            source_id，失败返回 None。
+        """
+        spec = SHIM_DEFS[name]
+        source_id = spec["source_id"]
         port = self._port(name)
         token = self._token(name)
+
+        source_cfg = {
+            "id": source_id,
+            "type": "openai_chat_completion",
+            "provider_type": "chat_completion",
+            "provider": "openai",
+            "enable": True,
+            "key": [token],
+            "api_base": f"http://127.0.0.1:{port}/v1",
+            "timeout": 240,
+            "proxy": "",
+            "custom_headers": {},
+        }
+
+        try:
+            pm = self.context.provider_manager
+            sources = pm.provider_sources_config or []
+            existing = None
+            for src in sources:
+                if src.get("id") == source_id:
+                    existing = src
+                    break
+
+            if existing is not None:
+                # 地址或 token 变了就更新，否则不动（避免每次启动都写盘）
+                changed = (
+                    existing.get("api_base") != source_cfg["api_base"]
+                    or existing.get("key") != source_cfg["key"]
+                )
+                if not changed:
+                    logger.info(
+                        f"[shim_connector] provider_source {source_id} 已存在且一致"
+                    )
+                    return source_id
+                existing.update(source_cfg)
+                logger.info(f"[shim_connector] provider_source {source_id} 已更新")
+            else:
+                sources.append(source_cfg)
+                logger.info(f"[shim_connector] provider_source {source_id} 已新建")
+
+            pm.provider_sources_config = sources
+
+            # 持久化到当前生效的配置档案（多档案时只改当前那个）
+            saved = False
+            try:
+                conf = self.context.astrbot_config_mgr.default_conf
+                if conf is not None:
+                    conf.setdefault("provider_sources", [])
+                    lst = conf["provider_sources"]
+                    lst[:] = [s for s in lst if s.get("id") != source_id]
+                    lst.append(source_cfg)
+                    conf.save_config()
+                    saved = True
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    f"[shim_connector] provider_source {source_id} 持久化失败（内存已生效）: {exc}"
+                )
+
+            if not saved:
+                logger.warning(
+                    f"[shim_connector] provider_source {source_id} 仅内存生效，重启后需重新注册"
+                )
+            return source_id
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                f"[shim_connector] 创建 provider_source {source_id} 失败: {exc}"
+            )
+            return None
+
+    async def _register_provider(self, name: str) -> None:
+        """把该 shim 注册成 AstrBot 的模型 provider。
+
+        provider id 格式：<source_id>/<model>，例如 trae_shim/glm-5.3-flash。
+        """
+        port = self._port(name)
+        token = self._token(name)
+        spec = SHIM_DEFS[name]
+        source_id = spec["source_id"]
 
         models = await self._fetch_models(port, token)
         if not models:
             logger.warning(f"[shim_connector] {name} 未返回模型列表，跳过注册")
             return
 
-        base_id = f"shim_{name}"
-        for idx, model_id in enumerate(models):
-            pid = base_id if len(models) == 1 else f"{base_id}_{idx}"
+        # 先确保 source 在
+        created_source = await self._ensure_provider_source(name)
+        if created_source is None:
+            logger.warning(
+                f"[shim_connector] {name} 的 provider_source 创建失败，跳过 provider 注册"
+            )
+            return
+
+        pm = self.context.provider_manager
+        for model_id in models:
+            pid = f"{source_id}/{model_id}"
             if pid in self.registered:
                 continue
 
+            # 已存在同名 provider 就跳过（不覆盖用户手动改过的配置）
+            #
+            # 注意：create_provider() 检查的是 self.acm.default_conf["provider"]，
+            # 而 get_provider_by_id() 查的是 inst_map（运行时实例表），两者可能不同步
+            # （例如 provider 被禁用不加载实例，但配置里还在）。
+            # 所以必须两边都查，否则会撞 "Provider ID ... already exists"。
+            already = False
             try:
-                existing = await self.context.provider_manager.get_provider_by_id(pid)
-                if existing is not None:
-                    self.registered.add(pid)
-                    logger.info(f"[shim_connector] provider {pid} 已存在，跳过")
-                    continue
+                conf = self.context.astrbot_config_mgr.default_conf
+                if conf is not None:
+                    for item in conf.get("provider", []):
+                        if item.get("id") == pid:
+                            already = True
+                            break
             except Exception:  # noqa: BLE001
                 pass
+            if not already:
+                try:
+                    if await pm.get_provider_by_id(pid) is not None:
+                        already = True
+                except Exception:  # noqa: BLE001
+                    pass
+            if already:
+                self.registered.add(pid)
+                logger.info(f"[shim_connector] provider {pid} 已存在，跳过")
+                continue
 
             cfg = {
                 "id": pid,
-                "type": "openai_chat_completion",
-                "provider_type": "chat_completion",
-                "provider": "openai",
-                "enable": True,
-                "key": [token],
-                "api_base": f"http://127.0.0.1:{port}/v1",
+                "provider_source_id": source_id,
                 "model": model_id,
-                "timeout": 240,
-                "proxy": "",
-                "custom_headers": {},
+                "enable": True,
                 "modalities": ["text", "tool_use"],
+                "custom_extra_body": {},
+                "max_context_tokens": 0,
             }
             try:
-                await self.context.provider_manager.create_provider(cfg)
+                await pm.create_provider(cfg)
                 self.registered.add(pid)
-                logger.info(f"[shim_connector] 已注册 {pid} -> {model_id} (:{port})")
+                logger.info(
+                    f"[shim_connector] 已注册 {pid} -> {model_id} (:{port})"
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.error(f"[shim_connector] 注册 {pid} 失败: {exc}")
 
@@ -344,7 +599,35 @@ class ShimConnector(Star):
             yield event.plain_result("已重启。\n\n" + self._status_text())
             return
 
-        yield event.plain_result(f"未知操作 {action}。用法：/shim [status|start|stop|restart]")
+        if action == "logs":
+            # /shim logs            所有 shim 各最后 20 行
+            # /shim logs trae       只看 trae
+            # /shim logs trae 50    只看 trae 最后 50 行
+            target = args[2].lower() if len(args) > 2 else ""
+            try:
+                want = int(args[3]) if len(args) > 3 else 20
+            except ValueError:
+                want = 20
+            want = max(1, min(want, MAX_LOG_TAIL_LINES))
+
+            names = [target] if target else list(SHIM_DEFS.keys())
+            chunks = []
+            for nm in names:
+                if nm not in SHIM_DEFS:
+                    chunks.append(f"未知 shim: {nm}\n可选: {', '.join(SHIM_DEFS)}")
+                    continue
+                lp = self._log_path(nm)
+                body = self._tail(lp, want)
+                chunks.append(
+                    f"===== {SHIM_DEFS[nm]['label']} ({nm}) =====\n{body}\n"
+                    f"[文件] {lp}"
+                )
+            yield event.plain_result("\n\n".join(chunks))
+            return
+
+        yield event.plain_result(
+            "未知操作 {0}。用法：/shim [status|start|stop|restart|logs]".format(action)
+        )
 
     def _status_text(self) -> str:
         """生成状态文本。"""
@@ -358,6 +641,10 @@ class ShimConnector(Star):
             mark = "[运行]" if running else "[停止]"
             state = "" if enabled else " (未启用)"
             lines.append(
-                f"{mark} {spec['label']:<12} :{port:<6} pid={pid}{state}"
+                f"{mark} {spec['label']:<14} :{port:<6} pid={pid:<7} "
+                f"src={spec['source_id']}{state}"
             )
+        lines.append("")
+        lines.append(f"日志目录: {self._log_dir()}")
+        lines.append("用法: /shim [status|start|stop|restart|logs [名称] [行数]]")
         return "\n".join(lines)
