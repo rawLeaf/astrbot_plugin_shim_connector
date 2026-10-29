@@ -55,6 +55,22 @@ const SYMMETRIC_SCHEME = "sym-v1";
 const KEY_FETCH_TIMEOUT_MS = 10000;
 const APP_EXECUTABLE_MISS_TTL_MS = 60000;
 
+/**
+ * 模型目录 —— WorkBuddy 上游接受的模型 id。
+ *
+ * 这些是实测可用的（2026-10-28）。上游不提供模型列表接口，
+ * 所以这里静态列出；调用 /v1/models 时返回它们，
+ * 好让下游（如 AstrBot 插件）能自动注册 provider。
+ */
+const MODEL_CATALOG = [
+  { id: "space-bunny",                 note: "默认，多模态" },
+  { id: "deepseek-v4.1-flash",         note: "DeepSeek 快速" },
+  { id: "deepseek-v4-pro",             note: "DeepSeek 深度" },
+  { id: "minimax-m3.1-flash",          note: "MiniMax 快速" },
+  { id: "glm-5.3-flash",               note: "智谱快速" },
+  { id: "kimi-k2.6",                   note: "Kimi" },
+];
+
 
 // ── at-rest 解密（改写自 at-rest.ts，MIT）───────────────────────────
 
@@ -666,7 +682,16 @@ const server = createServer((req, res) => {
   }
 
   if (req.method === "GET" && (url === "/v1/models" || url === "/v1/models/")) {
-    sendJson(res, 200, { object: "list", data: [] });
+    sendJson(res, 200, {
+      object: "list",
+      data: MODEL_CATALOG.map((m) => ({
+        id: m.id,
+        object: "model",
+        created: 0,
+        owned_by: "workbuddy",
+        note: m.note,
+      })),
+    });
     return;
   }
 
