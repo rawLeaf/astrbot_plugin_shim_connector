@@ -14,7 +14,7 @@
 - **Qoder 在 `APPDATA` 为空时完全不可用**。路径被拼成 `undefined\com.qodercn.app.stable`，
   导致解不出 OSCrypt 主密钥，`/v1/models` 返回 502、0 个模型，插件因此注册不到任何 Qoder provider。
   改用 `homedir()` 兜底。**实测修复后从 0 个模型恢复到 24 个**。
-- **`vision-shim` / `llm-pool-shim` 硬编码了本机配置路径**（`D:\4game\...`）。
+- **`vision-shim` / `llm-pool-shim` 硬编码了本机配置路径**（指向本机 AstrBot 安装目录的具体路径）。
   改为 `ASTRBOT_CONFIG || "cmd_config.json"`，并在配置缺失时给出明确报错后 `exit(2)`。
 
 ### 改进
@@ -89,6 +89,6 @@
 
 | 版本 | commit | 要点 |
 |---|---|---|
-| 1.1.1 | `8159e9c` | 修 Qoder APPDATA 兜底、去 4game 路径 |
+| 1.1.1 | `8159e9c` | 修 Qoder APPDATA 兜底、去掉硬编码本机路径 |
 | 1.1.0 | `08d02da` | 6 个 shim、日志落盘、`/shim logs` |
 | 1.0.0 | `4456c4d` | 首个版本，3 个 shim |
