@@ -35,13 +35,48 @@
 | `vision` | 8791 | `vision_rotator` | 视觉轮换层（5 个上游）|
 | `llm_pool` | 8792 | `llm_pool` | 通用 LLM 池（10 个上游）|
 
-## 安装
+## 安装（零配置）
 
-1. **装 Node.js**（>= 18）
-2. **装对应客户端并登录**：WorkBuddy / Trae / Qoder（用哪个装哪个）
-3. 在 AstrBot 插件页安装本插件（WebUI → 插件 → 安装）
-4. 到插件配置里勾选要启用的 shim，保存
-5. 重启 AstrBot（或 `/shim start`）
+**装完就能用。不需要填任何 token、路径或密钥。**
+
+1. 装 **Node.js**（>= 18）
+2. 装并登录任意一个客户端：**WorkBuddy / Trae / Qoder**（装几个用几个）
+3. AstrBot 插件页安装本插件 → 重启
+
+就这样。插件会自动：
+
+- 从各客户端**桌面端本地凭据**读出并解密（各家方式不同，见下）
+- 拉起 shim 子进程
+- 探测 `/v1/models` 并注册成 AstrBot 的 provider
+
+到「服务提供商」就能看到 `workbuddy_shim/*`、`trae_shim/*`、`qoder_shim/*` 这些模型。
+
+### 凭据是怎么拿到的（全自动，无需配置）
+
+| 客户端 | 自动读取方式 |
+|---|---|
+| **WorkBuddy** | 读桌面端 `workbuddy-desktop.info`；5.6.0+ 的加密字段靠启动 app 取 at-rest 密钥解开 |
+| **Trae** | 读桌面端 `User/globalStorage/storage.json` 的 `iCubeAuthInfo` 字段，AES-128-CBC 解密 |
+| **Qoder** | 读桌面端 `auth.v1.dat`，OSCrypt + DPAPI 解密 |
+
+**没有桌面端就用不了**——凭据只存在本地客户端里，插件不会、也不能凭空生成。
+
+### 想手动指定凭据？
+
+只有当自动发现失败时才需要：
+
+```powershell
+# Trae
+$env:TRAE_AUTH_FILE = "C:\path\to\trae-auth.json"
+```
+
+### 可选的高级 shim（默认关闭）
+
+| 分组 | 作用 | 什么时候开 |
+|---|---|---|
+| `workbuddy_intl` | WorkBuddy 国际版 | 你有国际版账号 |
+| `vision` | 视觉轮换层（5 上游） | 图片描述经常失败 |
+| `llm_pool` | 通用 LLM 池（10 上游） | self_learning 这类只填单个 provider 的插件总挂 |
 
 ## 配置说明
 
@@ -49,9 +84,9 @@
 
 | 分组 | 默认端口 | 默认启用 | 默认 token |
 |---|---|---|---|
-| `workbuddy` | 8787 | false | `sk-workbuddy-local` |
+| `workbuddy` | 8787 | **true** | `sk-workbuddy-local` |
 | `trae` | 8788 | **true** | `sk-trae-local` |
-| `qoder` | 8789 | false | `sk-qoder-local` |
+| `qoder` | 8789 | **true** | `sk-qoder-local` |
 | `workbuddy_intl` | 8790 | false | `sk-workbuddy-intl` |
 | `vision` | 8791 | false | `sk-vision-local` |
 | `llm_pool` | 8792 | false | `sk-llm-pool-local` |
@@ -186,7 +221,7 @@ WorkBuddy 凭据解密逻辑改写自 [dsh-connect-workbuddy](https://github.com
 
 各版本改了什么见 [CHANGELOG.md](CHANGELOG.md)。
 
-当前版本 **1.1.1**，要点：
+当前版本 **1.2.0**，要点：
 
 - 6 个 shim（含 WorkBuddy 国际版、视觉轮换、LLM 池）
 - shim 日志落盘 + `/shim logs` 命令

@@ -5,7 +5,8 @@ description: >-
   把本机已登录的 AI 客户端（Qoder / Trae / WorkBuddy 国内+国际）通过 loopback shim 接入 AstrBot。
   另含视觉轮换层（vision）和通用 LLM 池（llm-pool）。
   插件负责起停 shim 进程、自动注册 provider_source + provider、写 shim 日志到文件并在面板里显示运行状态。
-version: "1.1.1"
+  装完即可用：凭据从各客户端桌面端自动读取并解密，无需手动配置。
+version: "1.2.0"
 repo: "https://github.com/rawLeaf/astrbot_plugin_shim_connector"
 astrbot_version: ">=4.11.0"
 license: "MIT"

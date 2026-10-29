@@ -7,6 +7,41 @@
 
 ---
 
+## [1.2.0] — 2026-10-29
+
+### 新增
+
+- **零配置开箱即用**。装完插件即自动可用，不需要填任何 token、路径或密钥。
+- **Trae 凭据自动发现**：直接读桌面端 `User/globalStorage/storage.json` 的
+  `iCubeAuthInfo` 字段，用 AES-128-CBC 解密（密钥派生自 `sha512(sha512(random) || salt)`）。
+  不再需要事先准备 `TRAE_AUTH_FILE`。
+  - 解密算法改写自 [dsh-connect-trae](https://github.com/dingminhua/dsh-connect-trae)
+    （MIT, Copyright (c) 2026 LaoDing）。
+- **默认启用改为 workbuddy + trae + qoder**（三者都是自动发现凭据）。
+
+### 变更
+
+- `TRAE_AUTH_FILE` 从「必需」降级为「可选覆盖」：自动发现失败时才需要手工指定。
+- 凭据来自桌面端时**不写回任何文件**（那是 app 自己的文件，不该被插件改动）。
+- 高级 shim（`workbuddy_intl` / `vision` / `llm_pool`）默认保持关闭，按需开启。
+
+### 验证
+
+不设置任何凭据环境变量的情况下，6 个 shim 全部可用：
+
+| shim | 模型数 |
+|---|---|
+| WorkBuddy | 6 |
+| Trae | 6 |
+| Qoder | 24 |
+| WorkBuddy-Intl | 6 |
+| Vision | 1 |
+| LLM-Pool | 1 |
+
+Trae 实测真实对话返回正常（`DeepSeek-V4-Flash-Official`）。
+
+---
+
 ## [1.1.1] — 2026-10-29
 
 ### 修复
@@ -89,6 +124,7 @@
 
 | 版本 | commit | 要点 |
 |---|---|---|
+| 1.2.0 | 待定 | 零配置开箱即用；Trae 凭据自动发现 |
 | 1.1.1 | `8159e9c` | 修 Qoder APPDATA 兜底、去掉硬编码本机路径 |
 | 1.1.0 | `08d02da` | 6 个 shim、日志落盘、`/shim logs` |
 | 1.0.0 | `4456c4d` | 首个版本，3 个 shim |

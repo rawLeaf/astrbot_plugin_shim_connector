@@ -2,12 +2,12 @@
   "workbuddy": {
     "description": "WorkBuddy 接入",
     "type": "object",
-    "hint": "需要本机安装 WorkBuddy 桌面端并已登录。凭据由 shim 从桌面端读取并解密，插件不接触任何 token。",
+    "hint": "开箱即用：自动从 WorkBuddy 桌面端读取并解密凭据。需本机安装并登录 WorkBuddy。",
     "items": {
       "enable": {
         "description": "启用",
         "type": "bool",
-        "default": false,
+        "default": true,
         "hint": "开启后插件启动时自动拉起该 shim"
       },
       "port": {
@@ -26,7 +26,7 @@
   "trae": {
     "description": "Trae 接入",
     "type": "object",
-    "hint": "需要本机安装 Trae 桌面端并已登录。需设置环境变量 TRAE_AUTH_FILE 指向已解密的 auth JSON。",
+    "hint": "开箱即用：自动从 Trae 桌面端 storage.json 解密凭据。需本机安装并登录 Trae。",
     "items": {
       "enable": {
         "description": "启用",
@@ -48,12 +48,12 @@
   "qoder": {
     "description": "Qoder 接入",
     "type": "object",
-    "hint": "需要本机安装 Qoder 桌面端并已登录。凭据由 shim 从桌面端 auth.v1.dat 解密。",
+    "hint": "开箱即用：自动从 Qoder 桌面端 auth.v1.dat 解密凭据。需本机安装并登录 Qoder。",
     "items": {
       "enable": {
         "description": "启用",
         "type": "bool",
-        "default": false
+        "default": true
       },
       "port": {
         "description": "端口",

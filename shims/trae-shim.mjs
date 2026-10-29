@@ -2,7 +2,9 @@
 /**
  * trae-shim —— 把 Trae（国内版）模型接到 OpenAI 兼容接口上，给 AstrBot 用
  *
- * 凭据来源：一个 JSON 文件（{"credentials":{"0":{"accessToken","userId"}}}），用 TRAE_AUTH_FILE 指向
+ * 凭据来源（自动发现，无需配置）：
+ *   1. Trae 桌面端 User/globalStorage/storage.json，解密 iCubeAuthInfo 字段
+ *   2. 或用 TRAE_AUTH_FILE 指定凭据 JSON
  * 上游协议：POST https://trae-api-cn.mchost.guru/api/ide/v2/llm_raw_chat
  *   - Authorization: Cloud-IDE-JWT <token> + X-Ide-Token
  *   - body 需要 config_name（= 模型名）与 pass_back_reasoning
@@ -13,13 +15,129 @@
  */
 
 import { createServer } from "node:http";
-import { randomUUID } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
+import { createDecipheriv, createHash, randomUUID } from "node:crypto";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
+
+
+
+
+
+// ── Trae 桌面端凭据自动发现（storage.json 解密）─────────────────────
+// 算法改写自 dsh-connect-trae（MIT, Copyright (c) 2026 LaoDing）
+// https://github.com/dingminhua/dsh-connect-trae
+//
+// Trae 桌面端把凭据存在 User/globalStorage/storage.json 的
+// "iCubeAuthInfo://icube.cloudide" 字段里，格式为：
+//   [6字节头][32字节随机][AES-128-CBC 密文]
+// 密钥/IV = sha512(sha512(random) || salt) 的前 32 字节
+// 密文内容 = sha512(body) || body            （前 64 字节是校验和）
+
+/** 两套盐值（hex），分别对应两种加密家族。 */
+const SALT_A = Buffer.from("52096ad53036a538bf40a39e81f3d7fb7ce339829b2fff87348e4344c4dee9cb547b9432a6c2233dee4c950b42fac34e082ea16628d924b2765ba2496d8bd125", "hex");
+const SALT_B = Buffer.from("1fdda8338807c731b11210592780ec5f60517fa919b54a0d2de57a9f93c99cefa0e03b4dae2af5b0c8ebbb3c83539961172b047eba77d626e169146355210c7d", "hex");
+
+const TRAE_AUTH_KEY = "iCubeAuthInfo://icube.cloudide";
+
+function xorBuffers(a, b) {
+  const out = Buffer.alloc(a.length);
+  for (let i = 0; i < a.length; i += 1) out[i] = a[i] ^ (b[i] ?? 0);
+  return out;
+}
+
+function decryptTraeValue(encoded) {
+  const buf = Buffer.from(encoded, "base64");
+  if (buf.length <= 102) throw new Error("Trae 凭据密文过短");
+  const header = buf.subarray(0, 6);
+  const isAes = header.equals(Buffer.from([116, 99, 5, 16, 0, 0]));
+  const isAesPrivate = header.equals(Buffer.from([18, 57, 32, 32, 2, 3]));
+  if (!isAes && !isAesPrivate) throw new Error("未知的 Trae 凭据加密头");
+  const random = buf.subarray(6, 38);
+  const encrypted = buf.subarray(38);
+  const salt = xorBuffers(SALT_A, SALT_B);
+  const first = createHash("sha512").update(random).digest();
+  const derived = createHash("sha512").update(Buffer.concat([first, salt])).digest();
+  const decipher = createDecipheriv("aes-128-cbc", derived.subarray(0, 16), derived.subarray(16, 32));
+  const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
+  if (decrypted.length < 64) throw new Error("Trae 凭据明文过短");
+  const expected = decrypted.subarray(0, 64);
+  const plaintext = decrypted.subarray(64);
+  const actual = createHash("sha512").update(plaintext).digest();
+  if (!expected.equals(actual)) throw new Error("Trae 凭据完整性校验失败");
+  return plaintext.toString("utf8");
+}
+
+/** Trae 桌面端 storage.json 的候选路径。 */
+function traeStorageCandidates() {
+  const home = homedir();
+  const out = [];
+  if (process.platform === "win32") {
+    const roaming = process.env.APPDATA || join(home, "AppData", "Roaming");
+    for (const app of ["Trae CN", "Trae", "TraeCN"]) {
+      out.push(join(roaming, app, "User", "globalStorage", "storage.json"));
+    }
+  } else if (process.platform === "darwin") {
+    for (const app of ["Trae CN", "Trae"]) {
+      out.push(join(home, "Library", "Application Support", app, "User", "globalStorage", "storage.json"));
+    }
+  } else {
+    const cfg = process.env.XDG_CONFIG_HOME || join(home, ".config");
+    for (const app of ["Trae CN", "Trae"]) {
+      out.push(join(cfg, app, "User", "globalStorage", "storage.json"));
+    }
+  }
+  return out;
+}
+
+/** 从 Trae 桌面端 storage.json 直接解出凭据（不依赖 DSH 插件）。 */
+function loadCredentialFromDesktop() {
+  const tried = [];
+  for (const p of traeStorageCandidates()) {
+    tried.push(p);
+    if (!existsSync(p)) continue;
+    let doc;
+    try {
+      doc = JSON.parse(readFileSync(p, "utf8"));
+    } catch {
+      continue;
+    }
+    const enc = doc[TRAE_AUTH_KEY];
+    if (typeof enc !== "string" || enc === "") continue;
+    let plain;
+    try {
+      plain = decryptTraeValue(enc);
+    } catch {
+      continue;
+    }
+    let j;
+    try {
+      j = JSON.parse(plain);
+    } catch {
+      continue;
+    }
+    const token = typeof j.token === "string" ? j.token : "";
+    if (token === "") continue;
+    return {
+      accessToken: token,
+      refreshToken: typeof j.refreshToken === "string" ? j.refreshToken : "",
+      userId: String(j.userId ?? ""),
+      host: typeof j.host === "string" ? j.host : "",
+      userRegion: typeof j.userRegion === "string" ? j.userRegion : "",
+      expiresAtMs: typeof j.expiredAt === "number" ? j.expiredAt : 0,
+      source: "desktop:" + p,
+    };
+  }
+  throw new Error(
+    "找不到 Trae 凭据。已尝试：\n  " + tried.join("\n  ") +
+    "\n\n请确认：\n  1. Trae 桌面端已安装并登录\n" +
+    "  2. 或用 TRAE_AUTH_FILE 指定凭据 JSON"
+  );
+}
 
 const PORT = Number(process.env.TRAE_SHIM_PORT ?? 8788);
 const TOKEN = process.env.TRAE_SHIM_TOKEN ?? "sk-trae-local";
 const HOST = "127.0.0.1";
-const AUTH_FILE = process.env.TRAE_AUTH_FILE || "trae-auth.json";
 const CHAT_BASE = "https://trae-api-cn.mchost.guru";
 const CHAT_PATH = "/api/agent/v3/llm_utils_chat";
 const APP_ID = "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8";
@@ -123,14 +241,20 @@ async function refreshCredential(cred) {
 
 /** 把刷新结果写回凭据文件，让下次启动直接可用。 */
 function persistCredential(cred) {
+  // 只有显式指定了文件才写回；桌面端凭据不碰（那是 app 的文件）
+  const target = process.env.TRAE_AUTH_FILE;
+  if (!target || !existsSync(target)) {
+    console.error("[trae-shim] 凭据来自桌面端，不写回任何文件");
+    return;
+  }
   try {
-    const doc = JSON.parse(readFileSync(AUTH_FILE, "utf8"));
+    const doc = JSON.parse(readFileSync(target, "utf8"));
     const list = doc.credentials ?? {};
     const key = Object.keys(list)[0];
     if (key === undefined) return;
     doc.credentials[key] = cred;
-    writeFileSync(AUTH_FILE, JSON.stringify(doc, null, 2), "utf8");
-    console.error("[trae-shim] 已把新 token 写回 " + AUTH_FILE);
+    writeFileSync(target, JSON.stringify(doc, null, 2), "utf8");
+    console.error("[trae-shim] 已把新 token 写回 " + target);
   } catch (error) {
     console.error("[trae-shim] 写回凭据失败: " + (error && error.message ? error.message : error));
   }
@@ -163,14 +287,28 @@ async function resolveCredential() {
   return fresh;
 }
 
+/**
+ * 取凭据。优先级：
+ *   1. TRAE_AUTH_FILE 指定的文件（若存在）
+ *   2. Trae 桌面端 storage.json 自动解密
+ *
+ * 这样第三方用户只要装了 Trae 并登录，**不配任何东西就能用**。
+ */
 function loadCredential() {
-  const doc = JSON.parse(readFileSync(AUTH_FILE, "utf8"));
-  const list = doc.credentials ?? {};
-  const first = list[Object.keys(list)[0]];
-  if (!first || typeof first.accessToken !== "string") {
-    throw new Error("Trae 凭据为空或格式不符: " + AUTH_FILE);
+  // 1) 显式指定的文件优先
+  const explicit = process.env.TRAE_AUTH_FILE;
+  if (explicit && existsSync(explicit)) {
+    const doc = JSON.parse(readFileSync(explicit, "utf8"));
+    const list = doc.credentials ?? {};
+    const first = list[Object.keys(list)[0]];
+    if (first && typeof first.accessToken === "string") {
+      return { ...first, source: "file:" + explicit };
+    }
+    throw new Error("Trae 凭据为空或格式不符: " + explicit);
   }
-  return first;
+
+  // 2) 自动从桌面端解出
+  return loadCredentialFromDesktop();
 }
 
 function buildHeaders(cred, accept = "text/event-stream") {
