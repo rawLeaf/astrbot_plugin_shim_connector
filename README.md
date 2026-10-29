@@ -1,6 +1,9 @@
 # astrbot_plugin_shim_connector
 
-> 把本机已登录的 AI 客户端（Qoder / Trae / WorkBuddy）通过 loopback shim 接入 AstrBot。
+> 把本机已登录的 AI 客户端（Qoder / Trae / WorkBuddy 国内+国际）通过 loopback shim 接入 AstrBot。
+> 另含视觉轮换层与通用 LLM 池。
+
+**当前版本**：v1.1.0（2026-10-29）
 
 ## 它解决什么问题
 
@@ -14,9 +17,23 @@
 | 能力 | 说明 |
 |---|---|
 | 自动起 shim | 插件加载时按配置拉起 Node 子进程，卸载时自动停掉 |
-| 自动注册 provider | 探测 `/v1/models` 拿真实模型名，写进 AstrBot |
-| 状态查询 | `/shim` 命令查看各端口运行状态与 pid |
+| 自动注册 provider | 探测 `/v1/models` 拿真实模型名，先建 `provider_source` 再建 `provider` |
+| **shim 日志落盘** | 每个 shim 输出写到 `plugin_data/<插件>/<名称>.log`，超 2MB 滚动 |
+| **秒退诊断** | 启动后 2.5 秒检查进程，退出则把日志尾部打进插件日志 |
+| 状态查询 | `/shim` 命令查看各端口运行状态、pid、provider 前缀 |
 | 生命周期命令 | `/shim start\|stop\|restart` |
+| **日志查看** | `/shim logs [名称] [行数]` 直接在聊天里看 |
+
+## 支持的 shim（6 个）
+
+| shim | 端口 | provider 前缀 | 说明 |
+|---|---|---|---|
+| `workbuddy` | 8787 | `workbuddy_shim` | WorkBuddy 国内版 |
+| `trae` | 8788 | `trae_shim` | Trae（6 个模型）|
+| `qoder` | 8789 | `qoder_shim` | Qoder 国内/国际（24 个模型）|
+| `workbuddy_intl` | 8790 | `workbuddy_intl` | WorkBuddy 国际版（同脚本，`WB_REGION=global`）|
+| `vision` | 8791 | `vision_rotator` | 视觉轮换层（5 个上游）|
+| `llm_pool` | 8792 | `llm_pool` | 通用 LLM 池（10 个上游）|
 
 ## 安装
 
@@ -28,28 +45,76 @@
 
 ## 配置说明
 
+每个 shim 一组，都是 `enable` / `port` / `token`：
+
+| 分组 | 默认端口 | 默认启用 | 默认 token |
+|---|---|---|---|
+| `workbuddy` | 8787 | false | `sk-workbuddy-local` |
+| `trae` | 8788 | **true** | `sk-trae-local` |
+| `qoder` | 8789 | false | `sk-qoder-local` |
+| `workbuddy_intl` | 8790 | false | `sk-workbuddy-intl` |
+| `vision` | 8791 | false | `sk-vision-local` |
+| `llm_pool` | 8792 | false | `sk-llm-pool-local` |
+
 | 分组 | 项 | 默认 | 说明 |
 |---|---|---|---|
-| trae | enable | **true** | 默认启用 |
-| | port | 8788 | |
-| | token | sk-trae-local | 占位 token，非真实密钥 |
-| workbuddy | enable | false | 需装 WorkBuddy 桌面端 |
-| | port | 8787 | |
-| qoder | enable | false | 需装 Qoder 桌面端 |
-| | port | 8789 | |
-| advanced | node_path | 空 | 留空自动从 PATH 找 |
-| | auto_register | true | 自动注册 provider |
+| advanced | `node_path` | 空 | 留空自动从 PATH 找 |
+| | `auto_register` | true | 自动注册 provider |
 
 ## 命令
 
 ```
-/shim            # 查看状态
-/shim start      # 启动所有已启用的 shim
-/shim stop       # 停止插件启动的 shim
-/shim restart    # 重启
+/shim                   # 查看状态
+/shim start             # 启动所有已启用的 shim
+/shim stop              # 停止插件启动的 shim
+/shim restart           # 重启（改了 shim 脚本后用它）
+/shim logs              # 所有 shim 各最后 20 行
+/shim logs trae         # 只看 trae
+/shim logs trae 50      # trae 最后 50 行（上限 200）
 ```
 
 需要管理员权限。
+
+## provider 是怎么注册的
+
+用 AstrBot **原生两层结构**，最终 provider id 是 `<source_id>/<model>`：
+
+```python
+# 第一步：建 source（含共享的 api_base / key）
+provider_sources = [{
+    "id": "trae_shim",
+    "type": "openai_chat_completion",
+    "api_base": "http://127.0.0.1:8788/v1",
+    "key": ["sk-trae-local"],
+}]
+
+# 第二步：每个模型建一个 provider
+provider = [{
+    "id": "trae_shim/DeepSeek-V4-Flash-Official",
+    "provider_source_id": "trae_shim",
+    "model": "DeepSeek-V4-Flash-Official",
+    "modalities": ["text", "tool_use"],   # ← 必须带 tool_use
+}]
+```
+
+这样 provider id 和手写配置的 `workbuddy_shim/space-bunny` 完全一致，
+**已有的模型链一行都不用改**。
+
+## 日志
+
+位置：
+
+```
+<AstrBot>/data/plugin_data/astrbot_plugin_shim_connector/
+├── workbuddy.log        ├── workbuddy_intl.log
+├── trae.log             ├── vision.log
+└── qoder.log            └── llm_pool.log
+```
+
+- 每次启动写一行分隔头
+- 单文件超 2MB 改名为 `.log.1`
+- shim 秒退时，日志尾部 15 行会打进 AstrBot 日志
+- 聊天里用 `/shim logs <名称>` 直接看
 
 ## 端口约定
 
@@ -58,6 +123,9 @@
 | 8787 | WorkBuddy | `sk-workbuddy-local` |
 | 8788 | Trae | `sk-trae-local` |
 | 8789 | Qoder | `sk-qoder-local` |
+| 8790 | WorkBuddy Intl | `sk-workbuddy-intl` |
+| 8791 | Vision | `sk-vision-local` |
+| 8792 | LLM Pool | `sk-llm-pool-local` |
 
 ## 凭据怎么来的（重点）
 
@@ -71,15 +139,34 @@
 
 所有 shim 只绑 `127.0.0.1`，用可配置的占位 token 认证，不监听外网。
 
+**安全性审计结论**（2026-10-29 实测）：
+
+| 项 | 结果 |
+|---|---|
+| 对外域名 | 全部官方（trae / 腾讯 / qoder），**零第三方** |
+| 遥测上报 | **无**（telemetry/analytics/beacon/sentry 等全无命中）|
+| 凭据写盘 | qoder 0 处、workbuddy 0 处；trae 只写回用户自己的 `TRAE_AUTH_FILE` |
+| 凭据打日志 | 不打印 token 值，只打印路径和状态 |
+
 ## 常见问题
 
 | 症状 | 原因 | 处理 |
 |---|---|---|
 | 插件日志报「找不到 node」 | PATH 里没有 Node.js | 装 Node.js，或在配置里填 `node_path` |
-| shim 起了但没注册 provider | `/v1/models` 返回空 | 检查客户端是否已登录；看 shim 日志 |
+| shim 起了但没注册 provider | `/v1/models` 返回空 | 检查客户端是否已登录；`/shim logs <名称>` 看日志 |
+| shim 启动后秒退 | 凭据读取失败 / 端口冲突 | 看插件日志里的「启动后立即退出」+ 日志尾部 |
 | 模型调用返回空 | 客户端凭据过期 | 重新登录对应客户端 |
 | 端口被占用 | 已有 shim 在跑 | 正常，插件会复用 |
 | WorkBuddy 报「encrypted but key unavailable」 | 找不到桌面端 | 装 WorkBuddy，或设 `WORKBUDDY_APP_EXECUTABLE` |
+
+## 版本历史
+
+| 版本 | 变化 |
+|---|---|
+| v1.0.0 | 初版，支持 trae / workbuddy / qoder |
+| **v1.1.0** | 扩到 6 个 shim（新增 workbuddy_intl / vision / llm_pool）；
+| | provider id 改为 `<source_id>/<model>`；shim 日志落盘 + `/shim logs`；
+| | 修 `already exists` 误报（同时查 default_conf 与 inst_map）|
 
 ## 授权
 
