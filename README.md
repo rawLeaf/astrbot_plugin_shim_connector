@@ -149,7 +149,7 @@ $env:TRAE_AUTH_FILE = "C:\path\to\trae-auth.json"
 
 ## 配置说明
 
-每个 shim 一组，都是 `enable` / `port` / `token`：
+每个 shim 一组：`enable` / **`models`** / `port` / `token`。
 
 | 分组 | 默认端口 | 默认启用 | 默认 token |
 |---|---|---|---|
@@ -164,6 +164,60 @@ $env:TRAE_AUTH_FILE = "C:\path\to\trae-auth.json"
 |---|---|---|---|
 | advanced | `node_path` | 空 | 留空自动从 PATH 找 |
 | | `auto_register` | true | 自动注册 provider |
+| | `strict_models` | **true** | 只注册你在 `models` 里选的；关掉则总是注册全部 |
+
+---
+
+## 选择要注册的模型（重要）
+
+**默认留空 = 全部注册。** 想精简就在每个 shim 的 `models` 里填你要的那些。
+
+到「插件配置 → 对应的 shim 分组 → 要注册的模型」：
+
+- WebUI 里是一个**列表输入框**，可以逐条添加
+- 也可以多行粘贴，一行一个模型 id
+- **留空** = 该 shim 的全部模型都注册
+- 填了不存在的模型 → 日志会警告并忽略，不会报错
+
+### 各 shim 的可选模型
+
+**WorkBuddy**（6 个）
+
+```
+space-bunny            （默认，多模态）
+deepseek-v4.1-flash
+deepseek-v4-pro
+minimax-m3.1-flash
+glm-5.3-flash
+kimi-k2.6
+```
+
+**Trae**（6 个）
+
+```
+DeepSeek-V4-Flash-Official   （最稳）
+glm-5.3-flash
+Doubao-Seed-Code
+mimo-v2.6-flash
+minimax-m3.1-flash
+qwen3.8-flash
+```
+
+**Qoder**（24 个，国内 + 国际两区）
+
+模型 id 形如 `qoder-cn/qmodel_38max`、`qoder-cn/dfmodel`。
+**建议只填你实际要用的**——24 个全注册会让模型选择列表很长。
+
+> 首次探测 Qoder 模型列表要 10 秒以上（要实时拉上游），插件已经用异步请求，不会卡住 AstrBot。
+
+### 建议配置
+
+| 场景 | 怎么配 |
+|---|---|
+| 只想能聊 | 留空，全注册 |
+| 想精简模型列表 | 每个 shim 只填 1-2 个你最常用的 |
+| 只想用 Qoder | 关掉 workbuddy / trae 的 `enable` |
+| 只想避开慢模型 | 别填 `deepseek-v4-pro`（深度推理慢） |
 
 ## 命令
 
@@ -290,7 +344,7 @@ WorkBuddy 凭据解密逻辑改写自 [dsh-connect-workbuddy](https://github.com
 
 各版本改了什么见 [CHANGELOG.md](CHANGELOG.md)。
 
-当前版本 **1.2.1**，要点：
+当前版本 **1.3.0**，要点：
 
 - 6 个 shim（含 WorkBuddy 国际版、视觉轮换、LLM 池）
 - shim 日志落盘 + `/shim logs` 命令

@@ -152,6 +152,76 @@ class ShimConnector(Star):
         section = self.config.get(name, {}) if isinstance(self.config, dict) else {}
         return str(section.get("token") or SHIM_DEFS[name]["token"])
 
+    def _models(self, name: str) -> list[str]:
+        """取用户勾选的模型名单。
+
+        留空表示「全部」，由调用方决定怎么解释。
+
+        Args:
+            name: shim 名。
+
+        Returns:
+            模型 id 列表，可能为空（表示全部）。
+        """
+        section = self.config.get(name, {}) if isinstance(self.config, dict) else {}
+        raw = section.get("models")
+        if raw is None:
+            return []
+        # 配置可能是 list，也可能是多行字符串（WebUI 的 list 输入框）
+        if isinstance(raw, str):
+            items = raw.replace("\r", "\n").split("\n")
+        elif isinstance(raw, (list, tuple)):
+            items = raw
+        else:
+            return []
+        out: list[str] = []
+        for item in items:
+            text = str(item).strip()
+            if text == "" or text in out:
+                continue
+            out.append(text)
+        return out
+
+    def _strict_models(self) -> bool:
+        """是否严格按配置注册（False = 总是注册全部）。"""
+        section = self.config.get("advanced", {}) if isinstance(self.config, dict) else {}
+        return bool(section.get("strict_models", True))
+
+    def _pick_models(self, name: str, available: list[str]) -> list[str]:
+        """从 shim 返回的全部模型里，挑出用户要注册的那些。
+
+        Args:
+            name: shim 名。
+            available: shim 的 /v1/models 返回的全部 id。
+
+        Returns:
+            要注册的模型 id 列表。
+        """
+        wanted = self._models(name)
+        if not wanted:
+            return list(available)
+        if not self._strict_models():
+            return list(available)
+
+        picked: list[str] = []
+        missing: list[str] = []
+        for want in wanted:
+            if want in available:
+                if want not in picked:
+                    picked.append(want)
+            else:
+                missing.append(want)
+        if missing:
+            logger.warning(
+                f"[shim_connector] {name} 配置里的模型不存在，已忽略: {', '.join(missing)}"
+                f"\n  可选: {', '.join(available)}"
+            )
+        if not picked:
+            logger.warning(
+                f"[shim_connector] {name} 配置的模型全都匹配不上，本次不注册任何模型"
+            )
+        return picked
+
     def _node_exe(self) -> str | None:
         """找 node 可执行文件。"""
         section = self.config.get("advanced", {}) if isinstance(self.config, dict) else {}
@@ -457,10 +527,21 @@ class ShimConnector(Star):
         spec = SHIM_DEFS[name]
         source_id = spec["source_id"]
 
-        models = await self._fetch_models(port, token)
-        if not models:
+        available = await self._fetch_models(port, token)
+        if not available:
             logger.warning(f"[shim_connector] {name} 未返回模型列表，跳过注册")
             return
+
+        # 按用户配置筛选（留空 = 全部）
+        models = self._pick_models(name, available)
+        if not models:
+            return
+        picked_note = (
+            f"（从 {len(available)} 个中选了 {len(models)} 个）"
+            if len(models) != len(available)
+            else f"（全部 {len(models)} 个）"
+        )
+        logger.info(f"[shim_connector] {name} 待注册模型 {picked_note}")
 
         # 先确保 source 在
         created_source = await self._ensure_provider_source(name)

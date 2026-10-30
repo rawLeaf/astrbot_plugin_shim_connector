@@ -9,7 +9,7 @@ description: 白嫖机器人：把已付费的 WorkBuddy / Trae / Qoder 订阅�
 连同视觉轮换层和 LLM 池，通过 loopback shim 变成 AstrBot 可用的模型源。
 
 **仓库**：https://github.com/rawLeaf/astrbot_plugin_shim_connector
-**当前版本**：v1.2.1（2026-10-29）
+**当前版本**：v1.3.0（2026-10-30）
 
 ---
 
@@ -87,13 +87,13 @@ AstrBot → provider(<source_id>/<model>)
 
 ## 配置项
 
-每个 shim 一组，都是 `enable` / `port` / `token`：
+每个 shim 一组：`enable` / **`models`** / `port` / `token`。
 
-| 分组 | 默认端口 | 默认启用 | 默认 token |
+| 分组 | 端口 | 默认启用 | 默认 token |
 |---|---|---|---|
-| `workbuddy` | 8787 | false | `sk-workbuddy-local` |
+| `workbuddy` | 8787 | **true** | `sk-workbuddy-local` |
 | `trae` | 8788 | **true** | `sk-trae-local` |
-| `qoder` | 8789 | false | `sk-qoder-local` |
+| `qoder` | 8789 | **true** | `sk-qoder-local` |
 | `workbuddy_intl` | 8790 | false | `sk-workbuddy-intl` |
 | `vision` | 8791 | false | `sk-vision-local` |
 | `llm_pool` | 8792 | false | `sk-llm-pool-local` |
@@ -102,8 +102,25 @@ AstrBot → provider(<source_id>/<model>)
 
 | 项 | 默认 | 说明 |
 |---|---|---|
-| `node_path` | 空 | 留空自动从 PATH 找，找不到再试 `D:\3other\nodejs\node.exe` |
+| `node_path` | 空 | 留空自动从 PATH 找 |
 | `auto_register` | true | 自动注册 provider |
+| `strict_models` | **true** | 只注册 `models` 里选的；关掉则总是注册全部 |
+
+### models：选择要注册的模型
+
+**留空 = 全部注册。** 想精简就填你要的。
+
+- WebUI 里是列表输入框，可逐条添加；也支持多行粘贴，一行一个 id
+- 填了不存在的模型 → 日志警告并忽略，不报错
+- `strict_models: false` 时忽略这个配置，总是全注册
+
+各 shim 可选：
+
+| shim | 可选模型 |
+|---|---|
+| WorkBuddy | `space-bunny`(默认,多模态) / `deepseek-v4.1-flash` / `deepseek-v4-pro` / `minimax-m3.1-flash` / `glm-5.3-flash` / `kimi-k2.6` |
+| Trae | `DeepSeek-V4-Flash-Official`(最稳) / `glm-5.3-flash` / `Doubao-Seed-Code` / `mimo-v2.6-flash` / `minimax-m3.1-flash` / `qwen3.8-flash` |
+| Qoder | 24 个，id 形如 `qoder-cn/qmodel_38max`；建议只填要用的 |
 
 ---
 

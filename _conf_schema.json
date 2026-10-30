@@ -2,13 +2,22 @@
   "workbuddy": {
     "description": "WorkBuddy 接入",
     "type": "object",
-    "hint": "开箱即用：自动从 WorkBuddy 桌面端读取并解密凭据。需本机安装并登录 WorkBuddy。",
+    "hint": "需本机安装并登录 WorkBuddy 桌面端。凭据自动读取解密，无需配置。",
     "items": {
       "enable": {
         "description": "启用",
         "type": "bool",
         "default": true,
-        "hint": "开启后插件启动时自动拉起该 shim"
+        "hint": "关闭后插件不启动该 shim，也不会注册它的模型"
+      },
+      "models": {
+        "description": "要注册的模型",
+        "type": "list",
+        "items": {
+          "type": "string"
+        },
+        "default": [],
+        "hint": "留空 = 注册全部可选模型。\n\n可选：\n  space-bunny （默认，多模态）\n  deepseek-v4.1-flash\n  deepseek-v4-pro\n  minimax-m3.1-flash\n  glm-5.3-flash\n  kimi-k2.6\n\n填法：每行一个模型 id，或用上方「列表」输入框逐个添加。\n填了但不在可选列表里的会被忽略。"
       },
       "port": {
         "description": "端口",
@@ -19,19 +28,29 @@
         "description": "占位 Token",
         "type": "string",
         "default": "sk-workbuddy-local",
-        "hint": "下游连接 shim 时用的 Bearer，不是你的真实账号密钥"
+        "hint": "下游连接 shim 用的 Bearer，不是你的真实账号密钥"
       }
     }
   },
   "trae": {
     "description": "Trae 接入",
     "type": "object",
-    "hint": "开箱即用：自动从 Trae 桌面端 storage.json 解密凭据。需本机安装并登录 Trae。",
+    "hint": "需本机安装并登录 Trae 桌面端。凭据自动从 storage.json 解密，无需配置。",
     "items": {
       "enable": {
         "description": "启用",
         "type": "bool",
-        "default": true
+        "default": true,
+        "hint": "关闭后插件不启动该 shim，也不会注册它的模型"
+      },
+      "models": {
+        "description": "要注册的模型",
+        "type": "list",
+        "items": {
+          "type": "string"
+        },
+        "default": [],
+        "hint": "留空 = 注册全部可选模型。\n\n可选：\n  DeepSeek-V4-Flash-Official （最稳）\n  glm-5.3-flash\n  Doubao-Seed-Code\n  mimo-v2.6-flash\n  minimax-m3.1-flash\n  qwen3.8-flash"
       },
       "port": {
         "description": "端口",
@@ -41,19 +60,30 @@
       "token": {
         "description": "占位 Token",
         "type": "string",
-        "default": "sk-trae-local"
+        "default": "sk-trae-local",
+        "hint": "下游连接 shim 用的 Bearer，不是你的真实账号密钥"
       }
     }
   },
   "qoder": {
     "description": "Qoder 接入",
     "type": "object",
-    "hint": "开箱即用：自动从 Qoder 桌面端 auth.v1.dat 解密凭据。需本机安装并登录 Qoder。",
+    "hint": "需本机安装并登录 Qoder 桌面端。凭据自动从 auth.v1.dat 解密，无需配置。",
     "items": {
       "enable": {
         "description": "启用",
         "type": "bool",
-        "default": true
+        "default": true,
+        "hint": "关闭后插件不启动该 shim，也不会注册它的模型"
+      },
+      "models": {
+        "description": "要注册的模型",
+        "type": "list",
+        "items": {
+          "type": "string"
+        },
+        "default": [],
+        "hint": "留空 = 注册全部可选模型（共 24 个，国内 + 国际两区）。\n\n模型 id 形如 qoder-cn/qmodel_38max、qoder-cn/dfmodel。\n注意：模型列表要实时从上游拉取，首次探测可能需要 10 秒以上。\n\n建议只填你实际要用的，避免注册太多导致模型选择列表过长。"
       },
       "port": {
         "description": "端口",
@@ -63,19 +93,30 @@
       "token": {
         "description": "占位 Token",
         "type": "string",
-        "default": "sk-qoder-local"
+        "default": "sk-qoder-local",
+        "hint": "下游连接 shim 用的 Bearer，不是你的真实账号密钥"
       }
     }
   },
   "workbuddy_intl": {
-    "description": "WorkBuddy 国际版接入",
+    "description": "WorkBuddy 国际版",
     "type": "object",
-    "hint": "与国内版共用同一个 shim 脚本，靠 WB_REGION=global 区分。需要国际版客户端已登录。",
+    "hint": "WorkBuddy 国际区账号（与国内版同一个脚本，只是 WB_REGION=global）。",
     "items": {
       "enable": {
         "description": "启用",
         "type": "bool",
-        "default": false
+        "default": false,
+        "hint": "关闭后插件不启动该 shim，也不会注册它的模型"
+      },
+      "models": {
+        "description": "要注册的模型",
+        "type": "list",
+        "items": {
+          "type": "string"
+        },
+        "default": [],
+        "hint": "留空 = 全部。模型与国内版相同。"
       },
       "port": {
         "description": "端口",
@@ -85,19 +126,31 @@
       "token": {
         "description": "占位 Token",
         "type": "string",
-        "default": "sk-workbuddy-intl"
+        "default": "sk-workbuddy-intl",
+        "hint": "下游连接 shim 用的 Bearer，不是你的真实账号密钥"
       }
     }
   },
   "vision": {
-    "description": "视觉模型轮换层",
+    "description": "视觉轮换层",
     "type": "object",
-    "hint": "vision-shim.mjs：把多个视觉上游轮起来，供 image_to_text / 视频抽帧使用。",
+    "hint": "给「只能填单个 provider」的图片描述配置用的兜底层，在 5 个视觉上游之间轮换。\n\n一般不直接选这里的模型，而是把它配置到 AstrBot 的「图片描述 Provider」里。",
     "items": {
       "enable": {
         "description": "启用",
         "type": "bool",
         "default": false
+      },
+      "models": {
+        "description": "要注册的模型",
+        "type": "list",
+        "items": {
+          "type": "string"
+        },
+        "default": [
+          "vision-auto"
+        ],
+        "hint": "通常保持默认的 vision-auto 即可（这只是个虚拟模型名，实际由内部轮换）。"
       },
       "port": {
         "description": "端口",
@@ -114,12 +167,23 @@
   "llm_pool": {
     "description": "通用 LLM 池",
     "type": "object",
-    "hint": "llm-pool-shim.mjs：把多个文本上游轮起来，供插件内部固定单 provider 的场景使用（self_learning / qzone / 决策AI）。全部 429 时才有意义。",
+    "hint": "给 self_learning 这类「只能填单个 provider 且无跨 provider 回退」的插件用的兜底层，在 10 个上游之间轮换。",
     "items": {
       "enable": {
         "description": "启用",
         "type": "bool",
         "default": false
+      },
+      "models": {
+        "description": "要注册的模型",
+        "type": "list",
+        "items": {
+          "type": "string"
+        },
+        "default": [
+          "llm-pool-auto"
+        ],
+        "hint": "通常保持默认的 llm-pool-auto 即可（虚拟模型名，内部轮换）。"
       },
       "port": {
         "description": "端口",
@@ -141,13 +205,19 @@
         "description": "Node.js 路径",
         "type": "string",
         "default": "",
-        "hint": "留空则自动从 PATH 查找"
+        "hint": "留空则自动从 PATH 查找。Windows 常见位置：D:\\3other\\nodejs\\node.exe 或 C:\\Program Files\\nodejs\\node.exe"
       },
       "auto_register": {
         "description": "自动注册 Provider",
         "type": "bool",
         "default": true,
-        "hint": "shim 起来后自动把模型加进 AstrBot，无需手动配 provider_source"
+        "hint": "关闭后只起 shim，不往 AstrBot 加 provider（适合你想手动配 api_base 的场景）"
+      },
+      "strict_models": {
+        "description": "严格模式：只注册配置里的模型",
+        "type": "bool",
+        "default": true,
+        "hint": "开启（推荐）：配置了 models 就只注册那些；留空则注册全部。\n关闭：不管配置了什么，都注册 shim 返回的全部模型。"
       }
     }
   }
