@@ -149,22 +149,55 @@ $env:TRAE_AUTH_FILE = "C:\path\to\trae-auth.json"
 
 ## 配置说明
 
-每个 shim 一组：`enable` / **`models`** / `port` / `token`。
+两级开关，最终启用 = **总闸 AND 分开关**。
 
-| 分组 | 默认端口 | 默认启用 | 默认 token |
-|---|---|---|---|
-| `workbuddy` | 8787 | **true** | `sk-workbuddy-local` |
-| `trae` | 8788 | **true** | `sk-trae-local` |
-| `qoder` | 8789 | **true** | `sk-qoder-local` |
-| `workbuddy_intl` | 8790 | false | `sk-workbuddy-intl` |
-| `vision` | 8791 | false | `sk-vision-local` |
-| `llm_pool` | 8792 | false | `sk-llm-pool-local` |
+### 总闸：`shims.enabled`
 
-| 分组 | 项 | 默认 | 说明 |
+| 值 | 效果 |
+|---|---|
+| **开**（默认） | 按各 shim 的分开关走 |
+| 关 | **全部不启动**（分开关怎么设都没用） |
+
+### 分开关：每个 shim 的 `enable`
+
+| 分组 | 默认 | 端口 | 默认 token |
 |---|---|---|---|
-| advanced | `node_path` | 空 | 留空自动从 PATH 找 |
-| | `auto_register` | true | 自动注册 provider |
-| | `strict_models` | **true** | 只注册你在 `models` 里选的；关掉则总是注册全部 |
+| `workbuddy` | **开** | 8787 | `sk-workbuddy-local` |
+| `trae` | **开** | 8788 | `sk-trae-local` |
+| `qoder` | **开** | 8789 | `sk-qoder-local` |
+| `workbuddy_intl` | 关 | 8790 | `sk-workbuddy-intl` |
+| `vision` | 关 | 8791 | `sk-vision-local` |
+| `llm_pool` | 关 | 8792 | `sk-llm-pool-local` |
+
+**想只跑一个？** 总闸开着，把不要的 shim 的 `enable` 关掉即可。
+
+### 自定义 shim：`shims.custom`
+
+可以接入任意 OpenAI 兼容服务。每行一个：
+
+```
+名称|脚本文件|端口|token
+```
+
+例：
+
+```
+mymodel|my-shim.mjs|9000|sk-my-local
+远端|https://api.example.com/v1|9001|sk-xxx
+```
+
+- 脚本放插件 `shims/` 目录，或写绝对路径
+- 脚本需提供 `/healthz`、`/v1/models`、`/v1/chat/completions`
+- **自定义 shim 默认启用**（受总闸约束）
+- 想单独控制某个自定义 shim，可以加一个同名分组带 `enable: false`
+
+### advanced
+
+| 项 | 默认 | 说明 |
+|---|---|---|
+| `node_path` | 空 | 留空自动从 PATH 找 |
+| `auto_register` | true | 自动注册 provider |
+| `strict_models` | true | 只注册 `models` 里选的；关掉则全注册 |
 
 ---
 
@@ -344,7 +377,7 @@ WorkBuddy 凭据解密逻辑改写自 [dsh-connect-workbuddy](https://github.com
 
 各版本改了什么见 [CHANGELOG.md](CHANGELOG.md)。
 
-当前版本 **1.3.0**，要点：
+当前版本 **0.3.1**，要点：
 
 - 6 个 shim（含 WorkBuddy 国际版、视觉轮换、LLM 池）
 - shim 日志落盘 + `/shim logs` 命令

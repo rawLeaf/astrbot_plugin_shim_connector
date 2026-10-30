@@ -1,4 +1,26 @@
 {
+  "shims": {
+    "description": "🔌 总开关",
+    "type": "object",
+    "hint": "总闸。开启 = 按各自的分开关走；关闭 = 全部不启动。",
+    "items": {
+      "enabled": {
+        "description": "全部开启",
+        "type": "bool",
+        "default": true,
+        "hint": "开启：按下方每个 shim 自己的「启用」开关决定启不启动。\n\n关闭：全部不启动（不管分开关怎么设）。\n\n这是总闸，不是替代品 —— 精细控制请看各 shim 分组里的「启用」。"
+      },
+      "custom": {
+        "description": "自定义 shim",
+        "type": "list",
+        "items": {
+          "type": "string"
+        },
+        "default": [],
+        "hint": "每行一个，格式：\n  名称|脚本文件|端口|token\n\n例：\n  mymodel|my-shim.mjs|9000|sk-my-local\n\n脚本可以放插件 shims/ 目录下，也可以写绝对路径。\n脚本需提供 /healthz、/v1/models、/v1/chat/completions。\n\n自定义 shim 默认视为启用（受总开关约束）。"
+      }
+    }
+  },
   "workbuddy": {
     "description": "WorkBuddy 接入",
     "type": "object",
@@ -8,7 +30,7 @@
         "description": "启用",
         "type": "bool",
         "default": true,
-        "hint": "关闭后插件不启动该 shim，也不会注册它的模型"
+        "hint": "本 shim 的开关。总开关关闭时这一项不生效。"
       },
       "models": {
         "description": "要注册的模型",
@@ -41,7 +63,7 @@
         "description": "启用",
         "type": "bool",
         "default": true,
-        "hint": "关闭后插件不启动该 shim，也不会注册它的模型"
+        "hint": "本 shim 的开关。总开关关闭时这一项不生效。"
       },
       "models": {
         "description": "要注册的模型",
@@ -74,7 +96,7 @@
         "description": "启用",
         "type": "bool",
         "default": true,
-        "hint": "关闭后插件不启动该 shim，也不会注册它的模型"
+        "hint": "本 shim 的开关。总开关关闭时这一项不生效。"
       },
       "models": {
         "description": "要注册的模型",
@@ -107,7 +129,7 @@
         "description": "启用",
         "type": "bool",
         "default": false,
-        "hint": "关闭后插件不启动该 shim，也不会注册它的模型"
+        "hint": "本 shim 的开关。总开关关闭时这一项不生效。"
       },
       "models": {
         "description": "要注册的模型",
@@ -139,7 +161,8 @@
       "enable": {
         "description": "启用",
         "type": "bool",
-        "default": false
+        "default": false,
+        "hint": "本 shim 的开关。总开关关闭时这一项不生效。"
       },
       "models": {
         "description": "要注册的模型",
@@ -172,7 +195,8 @@
       "enable": {
         "description": "启用",
         "type": "bool",
-        "default": false
+        "default": false,
+        "hint": "本 shim 的开关。总开关关闭时这一项不生效。"
       },
       "models": {
         "description": "要注册的模型",

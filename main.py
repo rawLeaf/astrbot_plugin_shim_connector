@@ -134,23 +134,143 @@ class ShimConnector(Star):
 
     # ── 配置读取 ────────────────────────────────────────────────
 
+    # 各内置 shim 的默认启用状态（仅分开关默认值）
+    _DEFAULT_ENABLE: ClassVar[dict[str, bool]] = {
+        "workbuddy": True,
+        "trae": True,
+        "qoder": True,
+        "workbuddy_intl": False,
+        "vision": False,
+        "llm_pool": False,
+    }
+
+    def _master_enabled(self) -> bool:
+        """总闸状态。
+
+        没有这个配置项时视为开启（升级兼容）。
+
+        Returns:
+            True 表示总闸开启。
+        """
+        section = self.config.get("shims", {}) if isinstance(self.config, dict) else {}
+        if "enabled" not in section:
+            return True
+        return bool(section.get("enabled", True))
+
     def _enabled(self, name: str) -> bool:
-        """该 shim 是否启用。"""
+        """该 shim 是否要启动。
+
+        规则：**总闸 AND 分开关**。
+
+        Args:
+            name: shim 名。
+
+        Returns:
+            True 表示启动。
+        """
+        if not self._master_enabled():
+            return False
         section = self.config.get(name, {}) if isinstance(self.config, dict) else {}
-        return bool(section.get("enable", name == "trae"))
+        is_custom = name in self._custom_shims() and name not in SHIM_DEFS
+        default = True if is_custom else self._DEFAULT_ENABLE.get(name, False)
+        return bool(section.get("enable", default))
+
+    @staticmethod
+    def _as_str_list(raw) -> list[str]:
+        """把配置值归一成去空、去重的字符串列表。
+
+        兼容三种形态：list、多行字符串、None。
+
+        Args:
+            raw: 原始配置值。
+
+        Returns:
+            清洗后的列表。
+        """
+        if raw is None:
+            return []
+        if isinstance(raw, str):
+            items = raw.replace("\r", "\n").split("\n")
+        elif isinstance(raw, (list, tuple)):
+            items = raw
+        else:
+            return []
+        out: list[str] = []
+        for item in items:
+            text = str(item).strip()
+            if text == "" or text in out:
+                continue
+            out.append(text)
+        return out
+
+    def _custom_shims(self) -> dict[str, dict]:
+        """解析「自定义 shim」配置。
+
+        格式：名称|脚本文件|端口|token
+
+        Returns:
+            与 SHIM_DEFS 同构的字典，可直接合并使用。
+        """
+        section = self.config.get("shims", {}) if isinstance(self.config, dict) else {}
+        raw = section.get("custom")
+        out: dict[str, dict] = {}
+        for line in self._as_str_list(raw):
+            parts = [p.strip() for p in line.split("|")]
+            if len(parts) < 3:
+                logger.warning(
+                    f"[shim_connector] 自定义 shim 格式不对，已跳过: {line}"
+                    "（应为 名称|脚本|端口|token）"
+                )
+                continue
+            name, script, port_s = parts[0], parts[1], parts[2]
+            token = parts[3] if len(parts) > 3 and parts[3] else f"sk-{name}-local"
+            if not name or not script:
+                logger.warning(f"[shim_connector] 自定义 shim 缺少名称或脚本，已跳过: {line}")
+                continue
+            try:
+                port = int(port_s)
+            except ValueError:
+                logger.warning(f"[shim_connector] 自定义 shim 端口不是数字，已跳过: {line}")
+                continue
+            if name in SHIM_DEFS:
+                logger.warning(
+                    f"[shim_connector] 自定义 shim 名字与内置冲突，已跳过: {name}"
+                )
+                continue
+            out[name] = {
+                "script": script,
+                "port": port,
+                "token": token,
+                "label": name,
+                "env_prefix": f"{name.upper().replace('-', '_')}_SHIM",
+                "source_id": name,
+                "extra_env": {},
+                "custom": True,
+            }
+        return out
+
+    def _all_defs(self) -> dict[str, dict]:
+        """内置 + 自定义，合并后的全部 shim 定义。
+
+        Returns:
+            shim 名 -> 定义。
+        """
+        merged = dict(SHIM_DEFS)
+        merged.update(self._custom_shims())
+        return merged
 
     def _port(self, name: str) -> int:
         """取端口，配置优先。"""
         section = self.config.get(name, {}) if isinstance(self.config, dict) else {}
         try:
-            return int(section.get("port") or SHIM_DEFS[name]["port"])
+            return int(section.get("port") or self._all_defs()[name]["port"])
         except (TypeError, ValueError):
-            return int(SHIM_DEFS[name]["port"])
+            return int(self._all_defs()[name]["port"])
 
     def _token(self, name: str) -> str:
         """取占位 token，配置优先。"""
         section = self.config.get(name, {}) if isinstance(self.config, dict) else {}
-        return str(section.get("token") or SHIM_DEFS[name]["token"])
+        return str(section.get("token") or self._all_defs()[name]["token"])
 
     def _models(self, name: str) -> list[str]:
         """取用户勾选的模型名单。
@@ -250,16 +370,28 @@ class ShimConnector(Star):
             )
             return
 
+        if not self._master_enabled():
+            logger.warning(
+                "[shim_connector] 总开关已关闭，不启动任何 shim。\n"
+                "  到插件配置 → 🔌 总开关 → 「全部开启」打开。"
+            )
+            return
+
+        all_defs = self._all_defs()
         started = []
-        for name in SHIM_DEFS:
+        for name in all_defs:
             if not self._enabled(name):
-                logger.info(f"[shim_connector] {name} 未启用，跳过")
+                logger.debug(f"[shim_connector] {name} 未在总开关里，跳过")
                 continue
             ok = await self._start_shim(name, node)
             if ok:
                 started.append(name)
 
         if not started:
+            logger.warning(
+                "[shim_connector] 总开关开着，但没有任何 shim 的分开关是启用的。\n"
+                "  到插件配置 → 对应 shim 分组 → 「启用」打开。"
+            )
             return
 
         # 等 shim 起来
@@ -299,8 +431,8 @@ class ShimConnector(Star):
         Returns:
             True 表示已启动或已在运行。
         """
-        spec = SHIM_DEFS[name]
-        script = SHIM_DIR / spec["script"]
+        spec = self._all_defs()[name]
+        script = Path(spec["script"]) if Path(spec["script"]).is_absolute() else SHIM_DIR / spec["script"]
         if not script.is_file():
             logger.error(f"[shim_connector] 缺少脚本 {script}")
             return False
@@ -444,7 +576,7 @@ class ShimConnector(Star):
         Returns:
             source_id，失败返回 None。
         """
-        spec = SHIM_DEFS[name]
+        spec = self._all_defs()[name]
         source_id = spec["source_id"]
         port = self._port(name)
         token = self._token(name)
@@ -524,7 +656,7 @@ class ShimConnector(Star):
         """
         port = self._port(name)
         token = self._token(name)
-        spec = SHIM_DEFS[name]
+        spec = self._all_defs()[name]
         source_id = spec["source_id"]
 
         available = await self._fetch_models(port, token)
@@ -650,13 +782,16 @@ class ShimConnector(Star):
                 yield event.plain_result("找不到 node，请先安装 Node.js 或在插件配置里指定 node_path。")
                 return
             results = []
-            for name in SHIM_DEFS:
+            for name in self._all_defs():
                 if not self._enabled(name):
                     continue
                 ok = await self._start_shim(name, node)
-                results.append(f"{SHIM_DEFS[name]['label']}: {'已启动' if ok else '失败'}")
+                all_names = self._all_defs()
+                results.append(
+                    f"{all_names[name]['label']}: {'已启动' if ok else '失败'}"
+                )
             await asyncio.sleep(2.0)
-            for name in SHIM_DEFS:
+            for name in self._all_defs():
                 if self._enabled(name):
                     await self._register_provider(name)
             yield event.plain_result("\n".join(results) + "\n\n" + self._status_text())
@@ -678,11 +813,11 @@ class ShimConnector(Star):
             if node is None:
                 yield event.plain_result("找不到 node。")
                 return
-            for name in SHIM_DEFS:
+            for name in self._all_defs():
                 if self._enabled(name):
                     await self._start_shim(name, node)
             await asyncio.sleep(2.0)
-            for name in SHIM_DEFS:
+            for name in self._all_defs():
                 if self._enabled(name):
                     await self._register_provider(name)
             yield event.plain_result("已重启。\n\n" + self._status_text())
@@ -699,16 +834,18 @@ class ShimConnector(Star):
                 want = 20
             want = max(1, min(want, MAX_LOG_TAIL_LINES))
 
-            names = [target] if target else list(SHIM_DEFS.keys())
+            names = [target] if target else list(self._all_defs().keys())
             chunks = []
             for nm in names:
-                if nm not in SHIM_DEFS:
-                    chunks.append(f"未知 shim: {nm}\n可选: {', '.join(SHIM_DEFS)}")
+                if nm not in self._all_defs():
+                    chunks.append(
+                        f"未知 shim: {nm}\n可选: {', '.join(self._all_defs())}"
+                    )
                     continue
                 lp = self._log_path(nm)
                 body = self._tail(lp, want)
                 chunks.append(
-                    f"===== {SHIM_DEFS[nm]['label']} ({nm}) =====\n{body}\n"
+                    f"===== {self._all_defs()[nm]['label']} ({nm}) =====\n{body}\n"
                     f"[文件] {lp}"
                 )
             yield event.plain_result("\n\n".join(chunks))
@@ -721,7 +858,7 @@ class ShimConnector(Star):
     def _status_text(self) -> str:
         """生成状态文本。"""
         lines = ["本机 shim 状态", ""]
-        for name, spec in SHIM_DEFS.items():
+        for name, spec in self._all_defs().items():
             port = self._port(name)
             enabled = self._enabled(name)
             running = not port_free(port)

@@ -9,7 +9,7 @@ description: 白嫖机器人：把已付费的 WorkBuddy / Trae / Qoder 订阅�
 连同视觉轮换层和 LLM 池，通过 loopback shim 变成 AstrBot 可用的模型源。
 
 **仓库**：https://github.com/rawLeaf/astrbot_plugin_shim_connector
-**当前版本**：v1.3.0（2026-10-30）
+**当前版本**：v0.3.1（2026-10-30）
 
 ---
 
@@ -87,42 +87,62 @@ AstrBot → provider(<source_id>/<model>)
 
 ## 配置项
 
-每个 shim 一组：`enable` / **`models`** / `port` / `token`。
+**两级开关**，最终启用 = 总闸 AND 分开关。
 
-| 分组 | 端口 | 默认启用 | 默认 token |
+### 总闸 `shims.enabled`（bool，默认 true）
+
+- 开：按各 shim 的 `enable` 走
+- 关：**全部不启动**
+
+### 分开关（每个 shim 一组）
+
+| 分组 | 默认 | 端口 | `models` 留空含义 |
 |---|---|---|---|
-| `workbuddy` | 8787 | **true** | `sk-workbuddy-local` |
-| `trae` | 8788 | **true** | `sk-trae-local` |
-| `qoder` | 8789 | **true** | `sk-qoder-local` |
-| `workbuddy_intl` | 8790 | false | `sk-workbuddy-intl` |
-| `vision` | 8791 | false | `sk-vision-local` |
-| `llm_pool` | 8792 | false | `sk-llm-pool-local` |
+| `workbuddy` | **开** | 8787 | 全部 6 个 |
+| `trae` | **开** | 8788 | 全部 6 个 |
+| `qoder` | **开** | 8789 | 全部 24 个 |
+| `workbuddy_intl` | 关 | 8790 | 全部 |
+| `vision` | 关 | 8791 | `vision-auto` |
+| `llm_pool` | 关 | 8792 | `llm-pool-auto` |
 
-`advanced` 组：
+### 自定义 shim `shims.custom`（list）
+
+格式：`名称|脚本|端口|token`，每行一个。
+
+- 脚本可放插件 `shims/` 目录或写绝对路径
+- 需提供 `/healthz`、`/v1/models`、`/v1/chat/completions`
+- 默认启用（受总闸约束）
+- 与内置重名的会被忽略
+
+### models：选择要注册的模型
+
+**留空 = 全部注册。**
+
+| shim | 可选模型 |
+|---|---|
+| WorkBuddy | `space-bunny` / `deepseek-v4.1-flash` / `deepseek-v4-pro` / `minimax-m3.1-flash` / `glm-5.3-flash` / `kimi-k2.6` |
+| Trae | `DeepSeek-V4-Flash-Official` / `glm-5.3-flash` / `Doubao-Seed-Code` / `mimo-v2.6-flash` / `minimax-m3.1-flash` / `qwen3.8-flash` |
+| Qoder | 24 个，形如 `qoder-cn/qmodel_38max` |
+
+填了不存在的模型 → 警告并忽略，不报错。
+
+### advanced
 
 | 项 | 默认 | 说明 |
 |---|---|---|
 | `node_path` | 空 | 留空自动从 PATH 找 |
 | `auto_register` | true | 自动注册 provider |
-| `strict_models` | **true** | 只注册 `models` 里选的；关掉则总是注册全部 |
+| `strict_models` | true | 只注册 `models` 里选的 |
 
-### models：选择要注册的模型
+### 常见配置
 
-**留空 = 全部注册。** 想精简就填你要的。
-
-- WebUI 里是列表输入框，可逐条添加；也支持多行粘贴，一行一个 id
-- 填了不存在的模型 → 日志警告并忽略，不报错
-- `strict_models: false` 时忽略这个配置，总是全注册
-
-各 shim 可选：
-
-| shim | 可选模型 |
+| 需求 | 怎么配 |
 |---|---|
-| WorkBuddy | `space-bunny`(默认,多模态) / `deepseek-v4.1-flash` / `deepseek-v4-pro` / `minimax-m3.1-flash` / `glm-5.3-flash` / `kimi-k2.6` |
-| Trae | `DeepSeek-V4-Flash-Official`(最稳) / `glm-5.3-flash` / `Doubao-Seed-Code` / `mimo-v2.6-flash` / `minimax-m3.1-flash` / `qwen3.8-flash` |
-| Qoder | 24 个，id 形如 `qoder-cn/qmodel_38max`；建议只填要用的 |
+| 只跑 trae | 总闸开，关掉 workbuddy / qoder 的 enable |
+| 全部停掉 | 总闸关 |
+| 精简模型列表 | 各 shim 的 `models` 只填要用的 1-2 个 |
+| 接入自己的 shim | `shims.custom` 填 `名字\|脚本\|端口\|token` |
 
----
 
 ## 命令
 
