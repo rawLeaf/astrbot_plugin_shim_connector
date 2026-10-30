@@ -377,7 +377,7 @@ WorkBuddy 凭据解密逻辑改写自 [dsh-connect-workbuddy](https://github.com
 
 各版本改了什么见 [CHANGELOG.md](CHANGELOG.md)。
 
-当前版本 **0.3.1**，要点：
+当前版本 **1.3.1**，要点：
 
 - 6 个 shim（含 WorkBuddy 国际版、视觉轮换、LLM 池）
 - shim 日志落盘 + `/shim logs` 命令
