@@ -65,11 +65,23 @@ AstrBot → provider(<source_id>/<model>) → http://127.0.0.1:<port>/v1 → shi
 
 插件日志搜 `找不到 node`。如果没有，用配置里的 `advanced.node_path` 手动指定。
 
-Windows 常见位置：
+插件查找顺序：
 
-```
-D:\3other\nodejs\node.exe
-C:\Program Files\nodejs\node.exe
+1. 配置里的 `advanced.node_path`（最优先）
+2. `PATH` 里的 `node`
+3. 标准安装位置：
+   - `%ProgramFiles%\nodejs\node.exe`
+   - `%ProgramFiles(x86)%\nodejs\node.exe`
+   - `%LOCALAPPDATA%\Programs\nodejs\node.exe`
+   - `%NVM_HOME%\node.exe`
+
+**装在别的盘 / 绿色版？** 直接把完整路径填到 `advanced.node_path`。
+
+自检：
+
+```powershell
+where.exe node
+node --version
 ```
 
 **2.2 看 shim 日志（v1.1.0 起直接能看）**

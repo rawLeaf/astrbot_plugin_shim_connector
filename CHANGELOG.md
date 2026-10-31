@@ -21,6 +21,16 @@
   - `shims/qoder-shim.mjs` / `vision-shim.mjs` / `llm-pool-shim.mjs` 补 `LICENSE-NOTICE`
   - README「授权与署名」改为表格，列出每个上游项目的落点文件与版权人
 
+### 修复
+
+- **去掉写死的本机路径**：
+  - `main.py` 的 node 查找不再写死 `D:\3other\nodejs\node.exe`（开发者本机路径），
+    改为「配置 → PATH → 标准安装位置（用 `%ProgramFiles%` / `%LOCALAPPDATA%` / `%NVM_HOME%` 推导）」。
+  - `_conf_schema.json` 的 `node_path` 提示同步改正。
+  - `TROUBLESHOOTING.md` 改为列出真实的查找顺序，不再举例某个盘符路径。
+  - `workbuddy-shim.mjs` 的 app 发现不再写死 `C:\Program Files`，改用环境变量推导。
+  - 全项目扫描：无盘符路径、无用户名、无设备指纹。
+
 ### 改进
 
 - **`port_free` 改异步**：新增 `port_free_async()`，启动路径改用它，

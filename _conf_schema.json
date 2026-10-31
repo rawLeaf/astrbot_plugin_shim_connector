@@ -229,7 +229,7 @@
         "description": "Node.js 路径",
         "type": "string",
         "default": "",
-        "hint": "留空则自动从 PATH 查找。Windows 常见位置：D:\\3other\\nodejs\\node.exe 或 C:\\Program Files\\nodejs\\node.exe"
+        "hint": "留空则自动从 PATH 查找，再退到标准安装位置（%ProgramFiles%\\nodejs、%LOCALAPPDATA%\\Programs\\nodejs、%NVM_HOME%）。\n\n如果装在非常规位置（如绿色版、其他盘），在这里填 node.exe 的完整路径。"
       },
       "auto_register": {
         "description": "自动注册 Provider",

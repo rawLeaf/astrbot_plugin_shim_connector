@@ -235,11 +235,13 @@ function windowsRegistryAppExecutable() {
 
 /** 常见安装路径兜底。 */
 function windowsCommonPaths() {
+  // 不写死盘符：优先环境变量，缺失时用系统盘推导
+  const sysDrive = process.env.SystemDrive || "C:";
   const roots = [
     process.env.LOCALAPPDATA,
     process.env.APPDATA,
-    "C:\\Program Files",
-    "C:\\Program Files (x86)",
+    process.env.ProgramFiles || sysDrive + "\\Program Files",
+    process.env["ProgramFiles(x86)"] || sysDrive + "\\Program Files (x86)",
   ].filter(Boolean);
   const dirs = ["WorkBuddy", "WorkBuddyAI", "Tencent\\WorkBuddy", "CodeBuddy"];
   const out = [];

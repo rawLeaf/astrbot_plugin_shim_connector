@@ -373,6 +373,37 @@ class ShimConnector(Star):
             )
         return picked
 
+    @staticmethod
+    def _node_candidates() -> list[str]:
+        """Node.js 的标准安装位置候选。
+
+        只列各平台的标准路径，不含任何开发者本机特有目录。
+        优先用系统环境变量推导，避免写死盘符。
+
+        Returns:
+            候选路径列表（可能不存在，由调用方用 is_file 过滤）。
+        """
+        out: list[str] = []
+        if sys.platform == "win32":
+            # 不写死盘符：优先系统环境变量，缺失时用系统盘推导
+            sysdrive = os.environ.get("SystemDrive", "C:")
+            pf = os.environ.get("ProgramFiles") or sysdrive + "\\Program Files"
+            pf86 = os.environ.get("ProgramFiles(x86)") or sysdrive + "\\Program Files (x86)"
+            local = os.environ.get("LOCALAPPDATA", "")
+            out.append(str(Path(pf) / "nodejs" / "node.exe"))
+            out.append(str(Path(pf86) / "nodejs" / "node.exe"))
+            if local:
+                out.append(str(Path(local) / "Programs" / "nodejs" / "node.exe"))
+            nvm = os.environ.get("NVM_HOME")
+            if nvm:
+                out.append(str(Path(nvm) / "node.exe"))
+        elif sys.platform == "darwin":
+            out.append("/usr/local/bin/node")
+            out.append("/opt/homebrew/bin/node")
+        else:
+            out.append("/usr/bin/node")
+            out.append("/usr/local/bin/node")
+        return out
     def _node_exe(self) -> str | None:
         """找 node 可执行文件。"""
         section = self.config.get("advanced", {}) if isinstance(self.config, dict) else {}
@@ -382,11 +413,8 @@ class ShimConnector(Star):
         found = shutil.which("node")
         if found:
             return found
-        # Windows 常见安装位置兜底
-        for cand in (
-            r"D:\3other\nodejs\node.exe",
-            r"C:\Program Files\nodejs\node.exe",
-        ):
+        # 标准安装位置兜底（不写死盘符，用系统环境变量推导）
+        for cand in self._node_candidates():
             if Path(cand).is_file():
                 return cand
         return None
