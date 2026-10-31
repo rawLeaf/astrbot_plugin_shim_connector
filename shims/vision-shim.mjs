@@ -292,3 +292,12 @@ process.on("unhandledRejection", (e) => console.error("[vision-shim] unhandled: 
 server.listen(PORT, HOST, () => {
   console.log("[vision-shim] listening on http://" + HOST + ":" + PORT + "/v1");
 });
+
+/*
+ * LICENSE-NOTICE
+ *
+ * 本文件为原始实现（轮换层），未移植第三方代码。
+ * 依赖 AstrBot 自身的 provider 配置结构。
+ *
+ * MIT License — 同项目根目录 LICENSE。
+ */

@@ -658,3 +658,14 @@ process.on("unhandledRejection", (e) => console.error("[qoder-shim] unhandled: "
 server.listen(PORT, HOST, () => {
   console.log("[qoder-shim] listening on http://" + HOST + ":" + PORT + "/v1");
 });
+
+/*
+ * LICENSE-NOTICE
+ *
+ * COSY 签名与 OSCrypt/DPAPI 凭据解密思路参考：
+ *   dsh-connect-qoder — Copyright (c) 2026 LaoDing (MIT)
+ *   https://github.com/dingminhua/dsh-connect-qoder
+ * 公钥为 Qoder 客户端内置的服务端公钥（非私钥），随客户端分发。
+ *
+ * MIT License — 同项目根目录 LICENSE。
+ */

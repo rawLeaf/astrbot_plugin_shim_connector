@@ -105,8 +105,39 @@ SHIM_DEFS: dict[str, dict] = {
 }
 
 
+async def port_free_async(port: int, timeout: float = 0.5) -> bool:
+    """异步探测端口是否空闲（不阻塞事件循环）。
+
+    用 asyncio.open_connection 而不是 socket.connect_ex，
+    避免在事件循环里做同步 I/O。
+
+    Args:
+        port: 要检查的端口。
+        timeout: 连接超时秒数。
+
+    Returns:
+        True 表示可以绑定（没人监听）。
+    """
+    try:
+        _reader, writer = await asyncio.wait_for(
+            asyncio.open_connection("127.0.0.1", port), timeout=timeout
+        )
+    except (asyncio.TimeoutError, OSError):
+        # 连不上 = 端口空闲
+        return True
+    writer.close()
+    try:
+        await writer.wait_closed()
+    except Exception:  # noqa: BLE001
+        pass
+    # 连上了 = 有人监听
+    return False
+
+
 def port_free(port: int) -> bool:
-    """端口是否空闲。
+    """同步版端口探测，仅供纯同步上下文用（如状态文本渲染）。
+
+    异步路径请用 :func:`port_free_async`。
 
     Args:
         port: 要检查的端口。
@@ -114,9 +145,9 @@ def port_free(port: int) -> bool:
     Returns:
         True 表示可以绑定。
     """
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.settimeout(0.5)
-        return s.connect_ex(("127.0.0.1", port)) != 0
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.5)
+        return sock.connect_ex(("127.0.0.1", port)) != 0
 
 
 class ShimConnector(Star):
@@ -438,7 +469,7 @@ class ShimConnector(Star):
             return False
 
         port = self._port(name)
-        if not port_free(port):
+        if not await port_free_async(port):
             logger.info(f"[shim_connector] {name} 端口 {port} 已被占用，视为已在运行")
             return True
 

@@ -1,6 +1,6 @@
 ---
 name: astrbot-shim-connector
-description: 白嫖机器人：把已付费的 WorkBuddy / Trae / Qoder 订阅变成 AstrBot 的模型源（36 个模型，零 API 费用、零配置）。当用户要把本机客户端的模型接进机器人、问怎么不花 API 钱让机器人跑起来、装了这个插件、shim 起不来、provider 没注册、模型返回空、端口冲突、/shim 命令怎么用、凭据读不到，或需要判断问题出在插件层/shim 层/provider 层时使用。触发词：shim_connector、白嫖、本机模型接入、免费模型、零成本、WorkBuddy 接入、Trae 接入、Qoder 接入、provider 没注册、shim 起不来、模型返回空、8787、8788、8789、/shim 命令。
+description: 白嫖机器人：把已付费的 WorkBuddy / Trae / Qoder 订阅变成 AstrBot 的模型源（36 个候选模型按需勾选，零 API 费用、零配置）。当用户要把本机客户端的模型接进机器人、问怎么不花 API 钱让机器人跑起来、装了这个插件、shim 起不来、provider 没注册、模型返回空、端口冲突、/shim 命令怎么用、凭据读不到，或需要判断问题出在插件层/shim 层/provider 层时使用。触发词：shim_connector、白嫖、本机模型接入、免费模型、零成本、WorkBuddy 接入、Trae 接入、Qoder 接入、provider 没注册、shim 起不来、模型返回空、8787、8788、8789、/shim 命令。
 ---
 
 # 白嫖机器人 | AstrBot 本机模型接入插件
@@ -9,7 +9,7 @@ description: 白嫖机器人：把已付费的 WorkBuddy / Trae / Qoder 订阅�
 连同视觉轮换层和 LLM 池，通过 loopback shim 变成 AstrBot 可用的模型源。
 
 **仓库**：https://github.com/rawLeaf/astrbot_plugin_shim_connector
-**当前版本**：v1.3.1（2026-10-30）
+**当前版本**：v1.3.2（2026-10-31）
 
 ---
 
@@ -23,7 +23,7 @@ description: 白嫖机器人：把已付费的 WorkBuddy / Trae / Qoder 订阅�
 这个插件在本机起一组 shim，把「客户端已登录的额度」翻译成 OpenAI 兼容端点，
 机器人直接调用——**边际成本 0，钱你已经付过了。**
 
-合计 36 个模型：WorkBuddy 6 + Trae 6 + Qoder 24。
+合计 36 个候选模型（WorkBuddy 6 + Trae 6 + Qoder 24），可按需勾选要注册哪些。
 
 ---
 
@@ -50,8 +50,8 @@ AstrBot → provider(<source_id>/<model>)
 | shim | 端口 | provider 前缀 | 说明 |
 |---|---|---|---|
 | `workbuddy` | 8787 | `workbuddy_shim` | WorkBuddy 国内版 |
-| `trae` | 8788 | `trae_shim` | Trae（6 个模型）|
-| `qoder` | 8789 | `qoder_shim` | Qoder 国内/国际（24 个模型）|
+| `trae` | 8788 | `trae_shim` | Trae（6 个可选）|
+| `qoder` | 8789 | `qoder_shim` | Qoder 国内/国际（上游实拉，实测 24 个）|
 | `workbuddy_intl` | 8790 | `workbuddy_intl` | WorkBuddy 国际版 |
 | `vision` | 8791 | `vision_rotator` | **视觉轮换层**（5 个上游）|
 | `llm_pool` | 8792 | `llm_pool` | **通用 LLM 池**（10 个上游）|
@@ -332,7 +332,7 @@ Invoke-RestMethod "http://127.0.0.1:8788/v1/chat/completions" -Method Post `
 | 不支持热更新 | 改了 shim 脚本要 `/shim restart` |
 | provider 不会自动删 | 关掉某个 shim 后，已注册的 provider 还在，需手动删 |
 | 端口冲突不自动发现 | 固定端口，冲突时改配置 |
-| Qoder 模型多但慢 | 24 个模型，`/v1/models` 10s+ |
+| Qoder 模型多但慢 | 实测 24 个，`/v1/models` 10s+（异步，不阻塞） |
 | WorkBuddy 依赖桌面端 | 没装 app 就解不开凭据 |
 
 ---

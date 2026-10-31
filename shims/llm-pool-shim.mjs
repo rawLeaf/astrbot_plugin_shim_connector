@@ -305,3 +305,12 @@ process.on("unhandledRejection", (e) => console.error("[llm-pool] unhandled: " +
 server.listen(PORT, HOST, () => {
   console.log("[llm-pool] listening on http://" + HOST + ":" + PORT + "/v1");
 });
+
+/*
+ * LICENSE-NOTICE
+ *
+ * 本文件为原始实现（轮换池），未移植第三方代码。
+ * 依赖 AstrBot 自身的 provider 配置结构。
+ *
+ * MIT License — 同项目根目录 LICENSE。
+ */

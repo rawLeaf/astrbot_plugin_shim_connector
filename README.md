@@ -2,6 +2,17 @@
 
 > **白嫖机器人：把你已经付过钱的 AI 订阅，直接喂给你的 QQ 机器人。**
 
+> [!WARNING]
+> **使用前必读**
+>
+> 本插件通过复用 WorkBuddy / Trae / Qoder 桌面端的**私有协议**来接入模型，**可能违反这三家的服务条款（ToS），存在账号被限流或**封禁（封号）**的风险**。
+>
+> - 用的是**你自己**已登录的账号，不是盗用他人凭据
+> - 但厂商有权认定这类客户端接入为违规
+> - **风险完全自担**。账号出问题、订阅被终止，作者不承担任何责任
+>
+> 如果你不能接受这个风险，请不要安装。
+
 ---
 
 ## 一句话
@@ -26,17 +37,29 @@
 
 ## 白嫖的是什么
 
-| 你装的客户端 | 白嫖到的东西 | 实测可用模型 |
+| 你装的客户端 | 白嫖到的东西 | 可选模型 |
 |---|---|---|
 | **WorkBuddy** | 腾讯 CodeBuddy 额度（国内 + 国际两区） | 6 个 |
-| **Trae** | 字节 Trae 订阅里的 6 个模型 | 6 个 |
-| **Qoder** | 阿里 Qoder 免费档 / 订阅 | **24 个** |
-| **合计** | | **36 个模型** |
+| **Trae** | 字节 Trae 订阅里的模型 | 6 个 |
+| **Qoder** | 阿里 Qoder 免费档 / 订阅 | 上游返回多少就有多少（实测 24 个） |
+| **合计** | | **实测 36 个可选** |
 
-再加上两个进阶层：
+**「可选」不代表全注册。** 每个 shim 都能勾选要用的模型：
 
-- **视觉轮换层**：5 个视觉上游轮流用，图片描述不会因为一个挂掉就全废
-- **通用 LLM 池**：10 个上游轮换，给 self_learning 这类"只能填一个 provider"的插件用
+- `models` **留空 → 全部注册**
+- 填了 → **只注册那几个**
+- 所以实际加到机器人里的数量由你决定，1 个到 36 个都行
+
+> 模型列表哪来的？
+> - **WorkBuddy / Trae**：插件内置清单（这两家的上游不提供模型列表接口）
+> - **Qoder**：每次实时拉上游 `/v1/models`，所以数量随官方变化
+
+### 还有两个进阶层
+
+| 层 | 作用 |
+|---|---|
+| **视觉轮换层** | 5 个视觉上游轮流用，图片描述不会因为一个挂掉就全废 |
+| **通用 LLM 池** | 10 个上游轮换，给 self_learning 这类「只能填一个 provider」的插件用 |
 
 ---
 
@@ -50,8 +73,8 @@
 
 **没有绕过付费，没有盗用别人的账号。就是把你自己的东西多用一次。**
 
-> ⚠️ 但要说清楚：这种接入方式复用了客户端的私有协议，**可能违反各家的服务条款**。
-> 风险自担。真被官方封了别怪插件。
+> ⚠️ 但要说清楚：这种接入方式复用了客户端的私有协议，**可能违反各家的服务条款，最坏情况是账号被封号**。
+> 风险自担。详见文末「免责声明」。
 
 ---
 
@@ -61,7 +84,7 @@
 |---|---|
 | 机器人调 API，按 token 付费 | 用已有订阅，**边际成本 0** |
 | 三个厂商要配三套 API Key | **一个 Key 都不用填** |
-| 换模型要改配置、测延迟 | 36 个模型自动注册好，直接选 |
+| 换模型要改配置、测延迟 | 36 个候选，勾选即用 |
 | 某个模型挂了机器人就哑了 | 轮换层自动切下一个 |
 
 **实测成本对比**：如果机器人每天跑 100 万 token，用 DeepSeek 官方 API 大约 ¥1-2/天（粗算），一个月 30-60 块。用这个插件，**0 块**。
@@ -86,7 +109,7 @@
 | 🔑 **零配置** | 凭据从客户端桌面端自动读取解密 |
 | 🚀 **装完即用** | 6 个 shim 默认开 3 个，重启就生效 |
 | 🔄 **自动注册** | 探测模型列表，自动建 provider |
-| 📊 **36 个模型** | WorkBuddy 6 + Trae 6 + Qoder 24 |
+| 📊 **36 个候选模型** | 按需勾选，不会全塞给你 |
 | 🛡️ **只绑本机** | 全部 `127.0.0.1`，不暴露外网 |
 | 📝 **日志可查** | `/shim logs` 直接看 |
 | 🎯 **轮换兜底** | 视觉/LLM 池自动切上游 |
@@ -98,8 +121,8 @@
 | shim | 端口 | provider 前缀 | 说明 |
 |---|---|---|---|
 | `workbuddy` | 8787 | `workbuddy_shim` | WorkBuddy 国内版 |
-| `trae` | 8788 | `trae_shim` | Trae（6 个模型）|
-| `qoder` | 8789 | `qoder_shim` | Qoder 国内/国际（24 个模型）|
+| `trae` | 8788 | `trae_shim` | Trae（6 个可选）|
+| `qoder` | 8789 | `qoder_shim` | Qoder 国内/国际（上游实拉，实测 24 个）|
 | `workbuddy_intl` | 8790 | `workbuddy_intl` | WorkBuddy 国际版（同脚本，`WB_REGION=global`）|
 | `vision` | 8791 | `vision_rotator` | 视觉轮换层（5 个上游）|
 | `llm_pool` | 8792 | `llm_pool` | 通用 LLM 池（10 个上游）|
@@ -350,54 +373,82 @@ provider = [{
 | 端口被占用 | 已有 shim 在跑 | 正常，插件会复用 |
 | WorkBuddy 报「encrypted but key unavailable」 | 找不到桌面端 | 装 WorkBuddy，或设 `WORKBUDDY_APP_EXECUTABLE` |
 
-## 版本历史
+## 授权与署名
 
-| 版本 | 变化 |
+### 本项目
+
+**MIT License** · Copyright (c) 2026 rawLeaf
+
+完整文本见 [LICENSE](LICENSE)。
+
+### 第三方代码归属
+
+本项目部分实现改写自以下 **MIT** 许可项目，已按其要求保留版权声明：
+
+| 项目 | 用途 | 落点 | 版权 |
+|---|---|---|---|
+| [dsh-connect-workbuddy](https://github.com/dingminhua/dsh-connect-workbuddy) | WorkBuddy at-rest 凭据解密、app 发现 | `shims/workbuddy-shim.mjs` | Copyright (c) 2026 **LaoDing** |
+| [dsh-workbuddy-connect](https://github.com/corrinehu/dsh-workbuddy-connect) | 上述项目的上游参考 | `shims/workbuddy-shim.mjs` | Copyright (c) 2026 **Corrine Hu** |
+| [dsh-connect-trae](https://github.com/dingminhua/dsh-connect-trae) | Trae storage.json 凭据解密 | `shims/trae-shim.mjs` | Copyright (c) 2026 **LaoDing** |
+
+**完整 MIT 全文与归属声明见：**
+
+- [`LICENSE`](LICENSE) — 本项目许可 + 三方归属汇总
+- `shims/workbuddy-shim.mjs` 末尾 `LICENSE-NOTICE`
+- `shims/trae-shim.mjs` 末尾 `LICENSE-NOTICE`
+- `shims/qoder-shim.mjs` / `vision-shim.mjs` / `llm-pool-shim.mjs` 末尾 `LICENSE-NOTICE`
+
+### 未移植第三方的部分
+
+| 文件 | 说明 |
 |---|---|
-| v1.0.0 | 初版，支持 trae / workbuddy / qoder |
-| **v1.1.0** | 扩到 6 个 shim（新增 workbuddy_intl / vision / llm_pool）；
-| | provider id 改为 `<source_id>/<model>`；shim 日志落盘 + `/shim logs`；
-| | 修 `already exists` 误报（同时查 default_conf 与 inst_map）|
+| `main.py` | 原创 |
+| `shims/vision-shim.mjs` | 原创（轮换层） |
+| `shims/llm-pool-shim.mjs` | 原创（轮换池） |
+| `shims/qoder-shim.mjs` | COSY 签名与 OSCrypt/DPAPI 解密思路参考上游，实现为原创 |
 
-## 授权
+> Qoder shim 里的 `RSA_PUB` 是 **Qoder 客户端内置的服务端公钥**（非私钥），随客户端分发，不构成密钥泄露。
 
-MIT License。
+## 免责声明
 
-WorkBuddy 凭据解密逻辑改写自 [dsh-connect-workbuddy](https://github.com/dingminhua/dsh-connect-workbuddy)
-（MIT, Copyright (c) 2026 LaoDing），其参考 [dsh-workbuddy-connect](https://github.com/corrinehu/dsh-workbuddy-connect)
-（MIT, Copyright (c) 2026 Corrine Hu）。完整声明见 `shims/workbuddy-shim.mjs` 末尾 LICENSE-NOTICE。
+### 风险告知
 
-## 免责
+本插件通过复用 WorkBuddy / Trae / Qoder **桌面端的私有协议**来接入模型。这些客户端没有公开的 API，
+插件的做法是读取本机登录态并模拟客户端请求。**这种行为可能违反各家的服务条款（ToS）。**
 
-本插件复用已登录客户端的私有协议，可能违反对方服务条款。请自行评估风险。
+| 可能的后果 | 说明 |
+|---|---|
+| 账号被限流 | 厂商检测到异常客户端特征，可能临时限制 |
+| 账号被警告 | 部分厂商会发邮件警告 |
+| **账号被封禁（封号）** | 极端情况，订阅与数据可能一并失去 |
+| 订阅失效 | 违反 ToS 可能被终止订阅且不退款 |
+
+**风险完全由使用者承担。** 作者不提供任何形式的担保，不对账号、订阅、数据或任何连带损失负责。
+
+### 这不是破解
+
+需要说清楚，避免误解：
+
+- ✅ 用的是**你自己的账号、你自己的订阅额度**
+- ✅ 凭据从你本机已登录的客户端读取，不经过任何第三方服务器
+- ❌ 不是盗用他人账号
+- ❌ 不是绕过付费（钱你已经付过了）
+- ❌ 插件不收集、不上传任何凭据
+
+**本质是"把你自己已付费的额度换一个入口用"，但方式可能不被厂商允许。**
+
+### 你可以怎么做
+
+1. 只在**小号或不重要的账号**上试
+2. 发现异常（限流、登录异常）立刻停用
+3. 随时回到官方 API（改配置即可，插件不影响正常用法）
+4. 不接受风险就别装
 
 ---
 
 ## 变更日志
 
-各版本改了什么见 [CHANGELOG.md](CHANGELOG.md)。
-
-当前版本 **1.3.1**，要点：
-
-- 6 个 shim（含 WorkBuddy 国际版、视觉轮换、LLM 池）
-- shim 日志落盘 + `/shim logs` 命令
-- provider 注册用 AstrBot 原生两层结构（`<source_id>/<model>`）
-
+当前版本 **1.3.2** —— 完整变更见 [CHANGELOG.md](CHANGELOG.md)。
 
 ---
 
-## 灵感来源与许可
-
-本插件的三个 shim 移植/改写了以下 MIT 项目的实现思路与代码：
-
-| 项目 | 用途 | 许可 |
-|---|---|---|
-| [dsh-connect-workbuddy](https://github.com/dingminhua/dsh-connect-workbuddy) | WorkBuddy at-rest 凭据解密、app 发现 | MIT, Copyright (c) 2026 LaoDing |
-| [dsh-workbuddy-connect](https://github.com/corrinehu/dsh-workbuddy-connect) | 上述项目的上游参考 | MIT, Copyright (c) 2026 Corrine Hu |
-| [dsh-connect-trae](https://github.com/dingminhua/dsh-connect-trae) | Trae storage.json 凭据解密 | MIT, Copyright (c) 2026 LaoDing |
-
-完整许可声明见：
-- `shims/workbuddy-shim.mjs` 末尾的 `LICENSE-NOTICE`
-- `shims/trae-shim.mjs` 中的解密模块注释
-
-本插件自身以 **MIT** 许可发布。
