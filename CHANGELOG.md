@@ -24,7 +24,7 @@
 ### 修复
 
 - **去掉写死的本机路径**：
-  - `main.py` 的 node 查找不再写死 `D:\3other\nodejs\node.exe`（开发者本机路径），
+  - `main.py` 的 node 查找不再写死某个开发者本机的非常规路径，
     改为「配置 → PATH → 标准安装位置（用 `%ProgramFiles%` / `%LOCALAPPDATA%` / `%NVM_HOME%` 推导）」。
   - `_conf_schema.json` 的 `node_path` 提示同步改正。
   - `TROUBLESHOOTING.md` 改为列出真实的查找顺序，不再举例某个盘符路径。
