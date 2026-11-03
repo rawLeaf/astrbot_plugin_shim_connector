@@ -464,7 +464,10 @@ class ShimConnector(Star):
             want = self._effective_enabled(name)
 
             # 情况 0：端口变了 → 先杀掉旧端口上的进程
-            # 否则旧进程会变孤儿，新端口上又起一个，同时占两个端口
+            # 否则旧进程会变孤儿，新端口上又起一个，同时占两个端口。
+            #
+            # 注意：杀完旧进程后，**是否在新端口启动要看 want**。
+            # 用户可能只是改了端口，同时把 shim 禁用了 —— 那就不该起。
             if port_changed:
                 old_pid = self._pid_listening_on(prev_port)
                 if old_pid is not None:
@@ -479,10 +482,23 @@ class ShimConnector(Star):
                         f"[shim_connector] {name} 端口 {prev_port} → {port}，"
                         f"旧端口已无进程"
                     )
-                # 端口变了必然要重新起，跳过后续复用判断
-                ok = await self._start_shim(name, node)
+
+                # 端口变了，旧 provider 指向的地址已失效，注销掉
+                await self._unregister_providers(name)
+
+                if not want:
+                    logger.info(
+                        f"[shim_connector] {name} 已禁用，新端口 {port} 不启动"
+                    )
+                    continue
+
+                # 启用状态 → 在新端口启动（端口必须真空闲）
+                ok = await self._start_shim(name, node, reuse_ok=False)
                 if ok:
                     started.append(name)
+                    logger.info(
+                        f"[shim_connector] {name} 已在新端口 {port} 启动"
+                    )
                 continue
 
             # 情况 A：配置里禁用，但还在跑 → 停掉
@@ -512,7 +528,7 @@ class ShimConnector(Star):
                 continue
 
             # 情况 D：配置里启用，但没在跑 → 启动
-            ok = await self._start_shim(name, node)
+            ok = await self._start_shim(name, node, reuse_ok=False)
             if ok:
                 started.append(name)
 
@@ -768,15 +784,22 @@ class ShimConnector(Star):
             return False
         return self._enabled(name)
 
-    async def _start_shim(self, name: str, node: str) -> bool:
+    async def _start_shim(
+        self, name: str, node: str, *, reuse_ok: bool = True
+    ) -> bool:
         """起一个 shim 子进程。
 
         Args:
             name: shim 名。
             node: node 可执行文件路径。
+            reuse_ok: 端口被占时的处理。
+                True（默认）—— 视为「我们的 shim 已在运行」，返回 True。
+                    适用于插件重载、复用场景。
+                False —— 视为「端口冲突」，返回 False 并报错。
+                    适用于换端口、首次启动等必须真起的场景。
 
         Returns:
-            True 表示已启动或已在运行。
+            True 表示已启动或（reuse_ok 时）已在运行。
         """
         spec = self._all_defs()[name]
         script = Path(spec["script"]) if Path(spec["script"]).is_absolute() else SHIM_DIR / spec["script"]
@@ -786,8 +809,19 @@ class ShimConnector(Star):
 
         port = self._port(name)
         if not await port_free_async(port):
-            logger.info(f"[shim_connector] {name} 端口 {port} 已被占用，视为已在运行")
-            return True
+            if reuse_ok:
+                logger.info(
+                    f"[shim_connector] {name} 端口 {port} 已被占用，视为已在运行"
+                )
+                return True
+            # 换端口/首次启动场景：端口被占说明冲突，不能假装成功
+            pid = self._pid_listening_on(port)
+            logger.error(
+                f"[shim_connector] {name} 目标端口 {port} 已被占用"
+                f"（pid={pid}），无法启动。"
+                f"请改端口，或先停掉占用该端口的程序。"
+            )
+            return False
 
         env = os.environ.copy()
         env[f"{spec['env_prefix']}_PORT"] = str(port)
