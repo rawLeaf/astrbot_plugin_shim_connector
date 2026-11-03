@@ -325,11 +325,11 @@ qwen3.8-flash
 
 | 接口 | 方法 | 作用 |
 |---|---|---|
-| `/astrbot_plugin_shim_connector/status` | GET | 每个 shim 的启用/运行状态 |
-| `/astrbot_plugin_shim_connector/start` | POST | 启动指定 shim |
-| `/astrbot_plugin_shim_connector/stop` | POST | 停止指定 shim |
-| `/astrbot_plugin_shim_connector/restart` | POST | 重启指定 shim |
-| `/astrbot_plugin_shim_connector/toggle` | POST | 运行中就停，停着就起 |
+| `/api/plugins/extensions/astrbot_plugin_shim_connector/status` | GET | 每个 shim 的启用/运行状态 |
+| `/api/plugins/extensions/astrbot_plugin_shim_connector/start` | POST | 启动指定 shim |
+| `/api/plugins/extensions/astrbot_plugin_shim_connector/stop` | POST | 停止指定 shim |
+| `/api/plugins/extensions/astrbot_plugin_shim_connector/restart` | POST | 重启指定 shim |
+| `/api/plugins/extensions/astrbot_plugin_shim_connector/toggle` | POST | 运行中就停，停着就起 |
 
 请求体：
 
@@ -371,19 +371,19 @@ qwen3.8-flash
 ```bash
 # 看状态
 curl -H "Authorization: Bearer <你的 WebUI token>" \
-  http://127.0.0.1:6185/astrbot_plugin_shim_connector/status
+  http://127.0.0.1:6185/api/plugins/extensions/astrbot_plugin_shim_connector/status
 
 # 停 trae
 curl -X POST -H "Content-Type: application/json" \
   -H "Authorization: Bearer <token>" \
   -d '{"name":"trae"}' \
-  http://127.0.0.1:6185/astrbot_plugin_shim_connector/stop
+  http://127.0.0.1:6185/api/plugins/extensions/astrbot_plugin_shim_connector/stop
 
 # 起 trae
 curl -X POST -H "Content-Type: application/json" \
   -H "Authorization: Bearer <token>" \
   -d '{"name":"trae"}' \
-  http://127.0.0.1:6185/astrbot_plugin_shim_connector/start
+  http://127.0.0.1:6185/api/plugins/extensions/astrbot_plugin_shim_connector/start
 ```
 
 ---

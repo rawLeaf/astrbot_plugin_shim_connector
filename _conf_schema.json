@@ -8,7 +8,8 @@
         "description": "全部开启",
         "type": "bool",
         "default": true,
-        "hint": "开启：按下方每个 shim 自己的「启用」开关决定启不启动。\n\n关闭：全部不启动（不管分开关怎么设）。\n\n这是总闸，不是替代品 —— 精细控制请看各 shim 分组里的「启用」。"
+        "hint": "**总闸**。最终启用 = 总闸 AND 各 shim 的「启用」开关。\n\n  · 开 → 按各 shim 自己的开关决定\n  · 关 → 全部不启动（各分开关怎么设都没用）\n\n想临时全停（不重启）：调 Web API，或逐个关分开关后重启。",
+        "obvious_hint": true
       },
       "custom": {
         "description": "自定义 shim",
@@ -30,7 +31,8 @@
         "description": "启用",
         "type": "bool",
         "default": true,
-        "hint": "本 shim 的开关。总开关关闭时这一项不生效。"
+        "hint": "本 shim 的开关。**最终启用 = 总闸 AND 这一项**（总闸关闭时这一项不生效）。\n\n改完保存后需要重启 AstrBot 才生效。\n\n想不重启就启停单个 shim：\n  POST /api/plugins/extensions/astrbot_plugin_shim_connector/toggle\n  body: {\"name\":\"trae\"}\n  （需要面板登录态；插件页的热启停按钮走的也是这个接口）\n\n注意：通过 API 停用的 shim 只对本次运行有效，\n重启 AstrBot 后仍按这里的配置决定。",
+        "obvious_hint": true
       },
       "models": {
         "description": "要注册的模型",
@@ -50,7 +52,8 @@
         "description": "占位 Token",
         "type": "string",
         "default": "sk-workbuddy-local",
-        "hint": "下游连接 shim 用的 Bearer，不是你的真实账号密钥"
+        "hint": "插件与 shim 之间的认证口令，**两端自动同步，一般不用改**。\n\n它是干什么的：\n  1. 插件启动 shim 时，把它作为环境变量传给 shim（如 TRAE_SHIM_TOKEN）\n  2. shim 用它校验每个请求的 Bearer（只接受这个值）\n  3. 插件注册模型时，把同一个值填进 provider 的 key\n  两边必须一致，否则 AstrBot 调模型会被 shim 拒绝（401）。\n\n安全吗：\n  shim 只绑 127.0.0.1，这个 token 只在本机回环上生效。\n  它不是你的 WorkBuddy / Trae / Qoder 账号密钥，\n  改了也不影响客户端登录。\n\n什么时候需要改：\n  同机跑多套插件实例、需要区分时。否则保持默认即可。",
+        "obvious_hint": true
       }
     }
   },
@@ -63,7 +66,8 @@
         "description": "启用",
         "type": "bool",
         "default": true,
-        "hint": "本 shim 的开关。总开关关闭时这一项不生效。"
+        "hint": "本 shim 的开关。**最终启用 = 总闸 AND 这一项**（总闸关闭时这一项不生效）。\n\n改完保存后需要重启 AstrBot 才生效。\n\n想不重启就启停单个 shim：\n  POST /api/plugins/extensions/astrbot_plugin_shim_connector/toggle\n  body: {\"name\":\"trae\"}\n  （需要面板登录态；插件页的热启停按钮走的也是这个接口）\n\n注意：通过 API 停用的 shim 只对本次运行有效，\n重启 AstrBot 后仍按这里的配置决定。",
+        "obvious_hint": true
       },
       "models": {
         "description": "要注册的模型",
@@ -83,7 +87,8 @@
         "description": "占位 Token",
         "type": "string",
         "default": "sk-trae-local",
-        "hint": "下游连接 shim 用的 Bearer，不是你的真实账号密钥"
+        "hint": "插件与 shim 之间的认证口令，**两端自动同步，一般不用改**。\n\n它是干什么的：\n  1. 插件启动 shim 时，把它作为环境变量传给 shim（如 TRAE_SHIM_TOKEN）\n  2. shim 用它校验每个请求的 Bearer（只接受这个值）\n  3. 插件注册模型时，把同一个值填进 provider 的 key\n  两边必须一致，否则 AstrBot 调模型会被 shim 拒绝（401）。\n\n安全吗：\n  shim 只绑 127.0.0.1，这个 token 只在本机回环上生效。\n  它不是你的 WorkBuddy / Trae / Qoder 账号密钥，\n  改了也不影响客户端登录。\n\n什么时候需要改：\n  同机跑多套插件实例、需要区分时。否则保持默认即可。",
+        "obvious_hint": true
       }
     }
   },
@@ -96,7 +101,8 @@
         "description": "启用",
         "type": "bool",
         "default": true,
-        "hint": "本 shim 的开关。总开关关闭时这一项不生效。"
+        "hint": "本 shim 的开关。**最终启用 = 总闸 AND 这一项**（总闸关闭时这一项不生效）。\n\n改完保存后需要重启 AstrBot 才生效。\n\n想不重启就启停单个 shim：\n  POST /api/plugins/extensions/astrbot_plugin_shim_connector/toggle\n  body: {\"name\":\"trae\"}\n  （需要面板登录态；插件页的热启停按钮走的也是这个接口）\n\n注意：通过 API 停用的 shim 只对本次运行有效，\n重启 AstrBot 后仍按这里的配置决定。",
+        "obvious_hint": true
       },
       "models": {
         "description": "要注册的模型",
@@ -116,7 +122,8 @@
         "description": "占位 Token",
         "type": "string",
         "default": "sk-qoder-local",
-        "hint": "下游连接 shim 用的 Bearer，不是你的真实账号密钥"
+        "hint": "插件与 shim 之间的认证口令，**两端自动同步，一般不用改**。\n\n它是干什么的：\n  1. 插件启动 shim 时，把它作为环境变量传给 shim（如 TRAE_SHIM_TOKEN）\n  2. shim 用它校验每个请求的 Bearer（只接受这个值）\n  3. 插件注册模型时，把同一个值填进 provider 的 key\n  两边必须一致，否则 AstrBot 调模型会被 shim 拒绝（401）。\n\n安全吗：\n  shim 只绑 127.0.0.1，这个 token 只在本机回环上生效。\n  它不是你的 WorkBuddy / Trae / Qoder 账号密钥，\n  改了也不影响客户端登录。\n\n什么时候需要改：\n  同机跑多套插件实例、需要区分时。否则保持默认即可。",
+        "obvious_hint": true
       }
     }
   },
@@ -129,7 +136,8 @@
         "description": "启用",
         "type": "bool",
         "default": false,
-        "hint": "本 shim 的开关。总开关关闭时这一项不生效。"
+        "hint": "本 shim 的开关。**最终启用 = 总闸 AND 这一项**（总闸关闭时这一项不生效）。\n\n改完保存后需要重启 AstrBot 才生效。\n\n想不重启就启停单个 shim：\n  POST /api/plugins/extensions/astrbot_plugin_shim_connector/toggle\n  body: {\"name\":\"trae\"}\n  （需要面板登录态；插件页的热启停按钮走的也是这个接口）\n\n注意：通过 API 停用的 shim 只对本次运行有效，\n重启 AstrBot 后仍按这里的配置决定。",
+        "obvious_hint": true
       },
       "models": {
         "description": "要注册的模型",
@@ -149,7 +157,8 @@
         "description": "占位 Token",
         "type": "string",
         "default": "sk-workbuddy-intl",
-        "hint": "下游连接 shim 用的 Bearer，不是你的真实账号密钥"
+        "hint": "插件与 shim 之间的认证口令，**两端自动同步，一般不用改**。\n\n它是干什么的：\n  1. 插件启动 shim 时，把它作为环境变量传给 shim（如 TRAE_SHIM_TOKEN）\n  2. shim 用它校验每个请求的 Bearer（只接受这个值）\n  3. 插件注册模型时，把同一个值填进 provider 的 key\n  两边必须一致，否则 AstrBot 调模型会被 shim 拒绝（401）。\n\n安全吗：\n  shim 只绑 127.0.0.1，这个 token 只在本机回环上生效。\n  它不是你的 WorkBuddy / Trae / Qoder 账号密钥，\n  改了也不影响客户端登录。\n\n什么时候需要改：\n  同机跑多套插件实例、需要区分时。否则保持默认即可。",
+        "obvious_hint": true
       }
     }
   },
@@ -162,7 +171,8 @@
         "description": "启用",
         "type": "bool",
         "default": false,
-        "hint": "本 shim 的开关。总开关关闭时这一项不生效。"
+        "hint": "本 shim 的开关。**最终启用 = 总闸 AND 这一项**（总闸关闭时这一项不生效）。\n\n改完保存后需要重启 AstrBot 才生效。\n\n想不重启就启停单个 shim：\n  POST /api/plugins/extensions/astrbot_plugin_shim_connector/toggle\n  body: {\"name\":\"trae\"}\n  （需要面板登录态；插件页的热启停按钮走的也是这个接口）\n\n注意：通过 API 停用的 shim 只对本次运行有效，\n重启 AstrBot 后仍按这里的配置决定。",
+        "obvious_hint": true
       },
       "models": {
         "description": "要注册的模型",
@@ -183,7 +193,9 @@
       "token": {
         "description": "占位 Token",
         "type": "string",
-        "default": "sk-vision-local"
+        "default": "sk-vision-local",
+        "hint": "插件与 shim 之间的认证口令，**两端自动同步，一般不用改**。\n\n它是干什么的：\n  1. 插件启动 shim 时，把它作为环境变量传给 shim（如 TRAE_SHIM_TOKEN）\n  2. shim 用它校验每个请求的 Bearer（只接受这个值）\n  3. 插件注册模型时，把同一个值填进 provider 的 key\n  两边必须一致，否则 AstrBot 调模型会被 shim 拒绝（401）。\n\n安全吗：\n  shim 只绑 127.0.0.1，这个 token 只在本机回环上生效。\n  它不是你的 WorkBuddy / Trae / Qoder 账号密钥，\n  改了也不影响客户端登录。\n\n什么时候需要改：\n  同机跑多套插件实例、需要区分时。否则保持默认即可。",
+        "obvious_hint": true
       }
     }
   },
@@ -196,7 +208,8 @@
         "description": "启用",
         "type": "bool",
         "default": false,
-        "hint": "本 shim 的开关。总开关关闭时这一项不生效。"
+        "hint": "本 shim 的开关。**最终启用 = 总闸 AND 这一项**（总闸关闭时这一项不生效）。\n\n改完保存后需要重启 AstrBot 才生效。\n\n想不重启就启停单个 shim：\n  POST /api/plugins/extensions/astrbot_plugin_shim_connector/toggle\n  body: {\"name\":\"trae\"}\n  （需要面板登录态；插件页的热启停按钮走的也是这个接口）\n\n注意：通过 API 停用的 shim 只对本次运行有效，\n重启 AstrBot 后仍按这里的配置决定。",
+        "obvious_hint": true
       },
       "models": {
         "description": "要注册的模型",
@@ -217,7 +230,9 @@
       "token": {
         "description": "占位 Token",
         "type": "string",
-        "default": "sk-llm-pool-local"
+        "default": "sk-llm-pool-local",
+        "hint": "插件与 shim 之间的认证口令，**两端自动同步，一般不用改**。\n\n它是干什么的：\n  1. 插件启动 shim 时，把它作为环境变量传给 shim（如 TRAE_SHIM_TOKEN）\n  2. shim 用它校验每个请求的 Bearer（只接受这个值）\n  3. 插件注册模型时，把同一个值填进 provider 的 key\n  两边必须一致，否则 AstrBot 调模型会被 shim 拒绝（401）。\n\n安全吗：\n  shim 只绑 127.0.0.1，这个 token 只在本机回环上生效。\n  它不是你的 WorkBuddy / Trae / Qoder 账号密钥，\n  改了也不影响客户端登录。\n\n什么时候需要改：\n  同机跑多套插件实例、需要区分时。否则保持默认即可。",
+        "obvious_hint": true
       }
     }
   },
