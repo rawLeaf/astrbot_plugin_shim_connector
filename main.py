@@ -171,6 +171,11 @@ class ShimConnector(Star):
         self._lock = asyncio.Lock()
         # WebUI 热启停接口
         self._register_web_apis()
+        # 配置热重载：盯配置文件 mtime，变了就差分启停
+        self._cfg_mtime: float = 0.0
+        self._cfg_watch_task: asyncio.Task | None = None
+        # 记录「上次生效」的启用状态，用于差分
+        self._applied: dict[str, bool] = {}
 
     # ── 配置读取 ────────────────────────────────────────────────
 
@@ -468,12 +473,39 @@ class ShimConnector(Star):
         for name in started:
             await self._register_provider(name)
 
+        # 记录已生效的快照（配置语义），供后续差分
+        for name in all_defs:
+            self._applied[name] = self._enabled(name)
+
+        # 启动配置监视（点保存后自动生效，不用重启）
+        conf = self._conf_file_path()
+        try:
+            self._cfg_mtime = conf.stat().st_mtime if conf.is_file() else 0.0
+        except Exception:  # noqa: BLE001
+            self._cfg_mtime = 0.0
+        if self._cfg_watch_task is None or self._cfg_watch_task.done():
+            self._cfg_watch_task = asyncio.create_task(self._watch_config_loop())
+            logger.info(
+                f"[shim_connector] 配置热重载已启用（监视 {conf.name}，间隔 2s）"
+            )
+
     async def terminate(self):
-        """插件卸载时：停掉所有 shim。"""
+        """插件卸载时：停掉监视任务和所有 shim。"""
+        # 先停监视，避免它在卸载过程中触发重启
+        task = getattr(self, "_cfg_watch_task", None)
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        self._cfg_watch_task = None
+
         for name, proc in list(self.procs.items()):
             self._stop_shim(name, proc)
         self.procs.clear()
         self.registered.clear()
+        self._applied.clear()
 
     def _stop_shim(self, name: str, proc: subprocess.Popen) -> None:
         """停一个 shim 进程（只影响这一个）。"""
@@ -598,6 +630,157 @@ class ShimConnector(Star):
             pass
         # 兜底：插件在 <AstrBot>/data/plugins/<name>，往上两级是 data/
         return PLUGIN_DIR.parent.parent / "cmd_config.json"
+
+    def _conf_file_path(self) -> Path:
+        """本插件的配置文件路径。
+
+        实际结构：
+          <data>/cmd_config.json                      ← 主配置
+          <data>/config/<插件名>_config.json          ← 插件配置
+
+        所以插件配置目录是「主配置所在目录 / config」，
+        不是主配置同目录。要兼容两种布局。
+
+        Returns:
+            配置文件路径（可能不存在）。
+        """
+        base = self._astrbot_config_path().parent
+        name = f"{PLUGIN_DIR.name}_config.json"
+        candidates = [
+            base / "config" / name,   # 标准：data/config/xxx_config.json
+            base / name,               # 兜底：万一某版本放同目录
+        ]
+        for cand in candidates:
+            if cand.is_file():
+                return cand
+        # 都不存在时返回标准位置（供首次创建时判断）
+        return candidates[0]
+
+    def _reload_config_from_disk(self) -> dict | None:
+        """从磁盘读插件配置文件。
+
+        不改 self.config（那是 AstrBot 持有的对象），只返回一份新数据
+        供差分使用。
+
+        Returns:
+            解析后的配置字典；读不到返回 None。
+        """
+        try:
+            path = self._conf_file_path()
+            if not path.is_file():
+                return None
+            text = path.read_text(encoding="utf-8-sig")
+            data = json.loads(text)
+            return data if isinstance(data, dict) else None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[shim_connector] 读取配置失败: {exc}")
+            return None
+
+    async def _reconcile(self, reason: str = "配置变更") -> None:
+        """按最新配置做差分启停，只动变化的那些 shim。
+
+        Args:
+            reason: 触发原因，仅用于日志。
+        """
+        fresh = self._reload_config_from_disk()
+        if fresh is None:
+            return
+
+        # 用磁盘配置替换 self.config 的内容（就地更新，保持对象引用）
+        try:
+            if isinstance(self.config, dict):
+                self.config.clear()
+                self.config.update(fresh)
+            else:
+                self.config = fresh
+        except Exception:  # noqa: BLE001
+            self.config = fresh
+
+        if not self._master_enabled():
+            logger.info(f"[shim_connector] {reason}：总闸已关，停止全部 shim")
+            for name in list(self.procs):
+                proc = self.procs.get(name)
+                if proc:
+                    self._stop_shim(name, proc)
+                    self.procs.pop(name, None)
+                    await self._unregister_providers(name)
+            self._applied.clear()
+            return
+
+        all_defs = self._all_defs()
+
+        # 首次 reconcile 且没有基线：先记下当前状态，不执行任何动作
+        # 避免把「配置里本来就关闭」误判成「需要停止」
+        if not self._applied:
+            for name in all_defs:
+                self._applied[name] = self._enabled(name)
+            logger.info(
+                f"[shim_connector] {reason}：已建立基线"
+                f"（{sum(1 for v in self._applied.values() if v)} 个启用）"
+            )
+            return
+
+        changed = []
+
+        for name in all_defs:
+            want = self._enabled(name)
+            had = self._applied.get(name, want)
+            if want == had:
+                continue
+            changed.append(name)
+            if want:
+                node = self._node_exe()
+                if node is None:
+                    logger.warning("[shim_connector] 找不到 node，无法启动 " + name)
+                    continue
+                self._disabled_names().discard(name)
+                ok = await self._start_shim(name, node)
+                if ok:
+                    await asyncio.sleep(1.0)
+                    if self._auto_register():
+                        await self._register_provider(name)
+                    logger.info(f"[shim_connector] {reason}：已启动 {name}")
+            else:
+                proc = self.procs.get(name)
+                if proc is not None:
+                    self._stop_shim(name, proc)
+                    self.procs.pop(name, None)
+                removed = await self._unregister_providers(name)
+                logger.info(
+                    f"[shim_connector] {reason}：已停止 {name}"
+                    + (f"，注销 {removed} 个 provider" if removed else "")
+                )
+            self._applied[name] = want
+
+        if not changed:
+            logger.info(f"[shim_connector] {reason}：没有 shim 需要变更")
+        # 记录当前快照
+        for name in all_defs:
+            self._applied[name] = self._enabled(name)
+
+    async def _watch_config_loop(self) -> None:
+        """每 2 秒检查配置文件 mtime，变了就 reconcile。"""
+        while True:
+            try:
+                await asyncio.sleep(2.0)
+                path = self._conf_file_path()
+                if not path.is_file():
+                    continue
+                mtime = path.stat().st_mtime
+                if self._cfg_mtime == 0.0:
+                    self._cfg_mtime = mtime
+                    continue
+                if mtime != self._cfg_mtime:
+                    self._cfg_mtime = mtime
+                    logger.info(
+                        "[shim_connector] 检测到配置变更，准备差分启停"
+                    )
+                    async with self._lock:
+                        await self._reconcile("配置热重载")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[shim_connector] 配置监视异常: {exc}")
 
     def _log_dir(self) -> Path:
         """日志目录：优先 plugin_data，其次插件目录下 logs/。"""

@@ -317,6 +317,47 @@ qwen3.8-flash
 | 只想用 Qoder | 关掉 workbuddy / trae 的 `enable` |
 | 只想避开慢模型 | 别填 `deepseek-v4-pro`（深度推理慢） |
 
+## 配置热重载（v1.5.0 新增）
+
+**点保存就生效，不用重启 AstrBot。**
+
+插件每 2 秒检查一次配置文件（`<AstrBot>/data/config/astrbot_plugin_shim_connector_config.json`）的修改时间。检测到变化后：
+
+1. 重新读取配置文件
+2. 与「上次生效的状态」做**差分**
+3. 只对变化的 shim 执行启动 / 停止，其他 shim 完全不动
+
+### 会有哪些行为
+
+| 你的操作 | 插件反应（2 秒内） |
+|---|---|
+| 关掉 trae 的「启用」 | 只停 trae + 注销它的 provider |
+| 打开 qoder 的「启用」 | 只起 qoder + 注册 provider |
+| 改 trae 的端口 | （需重启，端口在启 shim 时读取） |
+| 关掉总闸 | 停止全部 shim |
+| 什么都没改，只点保存 | 检测到 mtime 变化，但差分结果为空，不做任何动作 |
+
+### 日志
+
+```
+[shim_connector] 检测到配置变更，准备差分启停
+[shim_connector] 配置热重载：已停止 trae，注销 1 个 provider
+[shim_connector] 配置热重载：已启动 qoder
+```
+
+### 管不动的情况
+
+| 情况 | 说明 |
+|---|---|
+| 改端口 | 需重启（shim 进程启动时读端口） |
+| 改 token | 需重启（同上） |
+| 改 `node_path` | 需重启 |
+| 增删自定义 shim | 部分支持（新增能起，删除要重启） |
+
+**只有「启用」开关是真正热生效的。**
+
+---
+
 ## WebUI 热启停（v1.4.0 新增）
 
 **单个 shim 的启停不需要重启 AstrBot。**
@@ -564,7 +605,7 @@ provider = [{
 
 ## 变更日志
 
-当前版本 **1.4.0** —— 完整变更见 [CHANGELOG.md](CHANGELOG.md)。
+当前版本 **1.5.0** —— 完整变更见 [CHANGELOG.md](CHANGELOG.md)。
 
 ---
 

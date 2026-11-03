@@ -13,7 +13,7 @@ description: >-
   零配置：凭据从各客户端桌面端本地存储自动读取并解密，不填任何 token 或路径。
 
   另含视觉轮换层（5 上游）和通用 LLM 池（10 上游），自动切换兜底。
-version: "1.4.0"
+version: "1.5.0"
 repo: "https://github.com/rawLeaf/astrbot_plugin_shim_connector"
 homepage: "https://github.com/rawLeaf/astrbot_plugin_shim_connector"
 license: "MIT"
@@ -52,6 +52,7 @@ features:
   - "可选模型：每个 shim 可勾选要注册的模型，留空则全部"
   - "36 个候选模型：WorkBuddy 6 + Trae 6 + Qoder 24，按需勾选"
   - "WebUI 热启停：单个 shim 启停无需重启 AstrBot"
+  - "配置热重载：点保存即自动差分启停，不用重启"
   - "自动起停 shim 子进程"
   - "自动探测模型并注册 provider"
   - "shim 日志落盘 + /shim logs 命令"
