@@ -7,6 +7,51 @@
 
 ---
 
+## [1.4.0] — 2026-11-03
+
+### 新增
+
+- **WebUI 热启停**：单个 shim 的启停**不需要重启 AstrBot**。
+  - `GET  /astrbot_plugin_shim_connector/status` — 查状态
+  - `POST /astrbot_plugin_shim_connector/start` — 启动指定 shim
+  - `POST /astrbot_plugin_shim_connector/stop` — 停止指定 shim
+  - `POST /astrbot_plugin_shim_connector/restart` — 重启指定 shim
+  - `POST /astrbot_plugin_shim_connector/toggle` — 切换
+  - 请求体 `{"name": "trae"}`
+
+- **停止时自动注销 provider**：调用 `provider_manager.terminate_provider()`
+  并把对应的 provider / provider_source 从配置里移除，
+  这样停掉的 shim 不会在模型列表里留下指向死端口的条目。
+
+- **临时停用机制**：WebUI 停止的 shim 只记在内存（`_temp_disabled`），
+  不写配置文件。重启 AstrBot 后按配置走。想让停用持久化请改配置页。
+
+### 变更
+
+- `_enabled()` 拆成两个概念：
+  - `_enabled()` — 纯配置（总闸 AND 分开关）
+  - `_effective_enabled()` — 配置 AND 未被临时停用
+  initialize 用后者决定启动哪些。
+- 新增 `_auto_register()` 读取 `advanced.auto_register`，
+  关掉后热启动不会自动注册 provider。
+
+### 说明
+
+热启停**不触发** `terminate()`，所以其他正在跑的 shim 完全不受影响。
+只有插件重载 / AstrBot 重启才会走 `terminate()` 全停 + 重新 initialize。
+
+### 验证
+
+| 检查 | 结果 |
+|---|---|
+| 临时停用生效/解除 | ✅ |
+| 总闸关闭时 effective=False | ✅ |
+| `_auto_register` 默认/关闭 | ✅ |
+| 7 个 Web API 方法存在 | ✅ |
+| Python 语法 | ✅ |
+
+---
+
 ## [1.3.2] — 2026-10-31
 
 ### 安全与合规
@@ -272,6 +317,7 @@ Trae 实测真实对话返回正常（`DeepSeek-V4-Flash-Official`）。
 
 | 版本 | commit | 要点 |
 |---|---|---|
+| 1.4.0 | 待定 | WebUI 热启停 + 停止时注销 provider |
 | 1.3.2 | 待定 | 免责声明强化；LICENSE + MIT 署名补齐；port_free 异步；删 README 版本历史 |
 | 1.3.1 | `e9fc6f9` | 总闸+分开关；自定义 shim |
 | 1.3.0 | `86742ff` | 模型可选（models 配置项） |

@@ -31,6 +31,13 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
 from astrbot.core import AstrBotConfig
 
+try:
+    from quart import jsonify as _quart_jsonify
+    from quart import request as _quart_request
+except Exception:  # noqa: BLE001
+    _quart_jsonify = None
+    _quart_request = None
+
 PLUGIN_DIR = Path(__file__).parent
 SHIM_DIR = PLUGIN_DIR / "shims"
 
@@ -162,6 +169,8 @@ class ShimConnector(Star):
         # 已经注册过的 provider id，避免重复
         self.registered: set[str] = set()
         self._lock = asyncio.Lock()
+        # WebUI 热启停接口
+        self._register_web_apis()
 
     # ── 配置读取 ────────────────────────────────────────────────
 
@@ -439,8 +448,8 @@ class ShimConnector(Star):
         all_defs = self._all_defs()
         started = []
         for name in all_defs:
-            if not self._enabled(name):
-                logger.debug(f"[shim_connector] {name} 未在总开关里，跳过")
+            if not self._effective_enabled(name):
+                logger.debug(f"[shim_connector] {name} 未启用或被临时停用，跳过")
                 continue
             ok = await self._start_shim(name, node)
             if ok:
@@ -467,7 +476,7 @@ class ShimConnector(Star):
         self.registered.clear()
 
     def _stop_shim(self, name: str, proc: subprocess.Popen) -> None:
-        """停一个 shim 进程。"""
+        """停一个 shim 进程（只影响这一个）。"""
         if proc.poll() is not None:
             return
         try:
@@ -476,9 +485,32 @@ class ShimConnector(Star):
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
+                try:
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    pass
             logger.info(f"[shim_connector] 已停止 {name}")
         except Exception as exc:  # noqa: BLE001
             logger.error(f"[shim_connector] 停止 {name} 失败: {exc}")
+
+    def _disabled_names(self) -> set[str]:
+        """记录被 WebUI 临时停用的 shim（重启后失效）。"""
+        if not hasattr(self, "_temp_disabled"):
+            self._temp_disabled: set[str] = set()
+        return self._temp_disabled
+
+    def _effective_enabled(self, name: str) -> bool:
+        """实际是否应启动 = 配置启用 AND 没被临时停用。
+
+        Args:
+            name: shim 名。
+
+        Returns:
+            True 表示应启动。
+        """
+        if name in self._disabled_names():
+            return False
+        return self._enabled(name)
 
     async def _start_shim(self, name: str, node: str) -> bool:
         """起一个 shim 子进程。
@@ -933,3 +965,240 @@ class ShimConnector(Star):
         lines.append(f"日志目录: {self._log_dir()}")
         lines.append("用法: /shim [status|start|stop|restart|logs [名称] [行数]]")
         return "\n".join(lines)
+
+    # ── WebUI 热启停接口 ────────────────────────────────────────
+
+    def _register_web_apis(self) -> None:
+        """注册 WebUI 用的热启停接口（无需重启 AstrBot）。"""
+        routes = (
+            ("status", self._api_status, ["GET"], "shim 运行状态"),
+            ("start", self._api_start, ["POST"], "启动指定 shim"),
+            ("stop", self._api_stop, ["POST"], "停止指定 shim"),
+            ("restart", self._api_restart, ["POST"], "重启指定 shim"),
+            ("toggle", self._api_toggle, ["POST"], "切换指定 shim 启停"),
+        )
+        for endpoint, handler, methods, desc in routes:
+            try:
+                self.context.register_web_api(
+                    f"/astrbot_plugin_shim_connector/{endpoint}",
+                    handler,
+                    methods,
+                    desc,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[shim_connector] 注册 Web API {endpoint} 失败: {exc}")
+
+    async def _api_response(self, payload: dict, status: int = 200):
+        """构造 Web API 响应。"""
+        if _quart_jsonify is None:
+            return payload
+        response = _quart_jsonify(payload)
+        response.status_code = status
+        return response
+
+    async def _api_body(self) -> dict:
+        """读 POST body。"""
+        if _quart_request is None:
+            return {}
+        try:
+            data = await _quart_request.get_json(silent=True)
+            return data if isinstance(data, dict) else {}
+        except Exception:  # noqa: BLE001
+            return {}
+
+    async def _api_status(self):
+        """GET 状态：每个 shim 的启用/运行/source 信息。"""
+
+        async def handler():
+            items = []
+            for name, spec in self._all_defs().items():
+                port = self._port(name)
+                items.append(
+                    {
+                        "name": name,
+                        "label": spec["label"],
+                        "port": port,
+                        "enabled": self._enabled(name),
+                        "running": not await port_free_async(port),
+                        "source_id": spec["source_id"],
+                        "custom": bool(spec.get("custom")),
+                    }
+                )
+            return {
+                "ok": True,
+                "master": self._master_enabled(),
+                "log_dir": str(self._log_dir()),
+                "shims": items,
+            }
+
+        return await self._api_response(await handler())
+
+    def _auto_register(self) -> bool:
+        """是否自动注册 provider。"""
+        section = self.config.get("advanced", {}) if isinstance(self.config, dict) else {}
+        return bool(section.get("auto_register", True))
+
+    async def _unregister_providers(self, name: str) -> int:
+        """注销某个 shim 注册的全部 provider 与 provider_source。
+
+        Args:
+            name: shim 名。
+
+        Returns:
+            实际移除的 provider 数量。
+        """
+        spec = self._all_defs().get(name)
+        if not spec:
+            return 0
+        source_id = spec["source_id"]
+        pm = self.context.provider_manager
+        removed = 0
+        try:
+            conf = self.context.astrbot_config_mgr.default_conf
+            if conf is None:
+                return 0
+            # 1) 移除 provider 里 provider_source_id == source_id 的条目
+            providers = conf.get("provider", [])
+            keep = [
+                item
+                for item in providers
+                if item.get("provider_source_id") != source_id
+            ]
+            removed = len(providers) - len(keep)
+            if removed:
+                conf["provider"] = keep
+            # 2) 移除 provider_source
+            sources = conf.get("provider_sources", [])
+            left = [s for s in sources if s.get("id") != source_id]
+            if len(left) != len(sources):
+                conf["provider_sources"] = left
+            # 3) 清掉内存里的实例
+            for pid in list(self.registered):
+                if pid.startswith(source_id + "/") or pid == source_id:
+                    try:
+                        await pm.terminate_provider(pid)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    self.registered.discard(pid)
+            conf.save_config()
+            logger.info(
+                f"[shim_connector] 已注销 {name} 的 {removed} 个 provider"
+                f"（source={source_id}）"
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[shim_connector] 注销 {name} 的 provider 失败: {exc}")
+        return removed
+
+    def _require_name(self, name: str) -> str:
+        """校验 shim 名。"""
+        defs = self._all_defs()
+        if name not in defs:
+            raise ValueError(
+                f"未知 shim: {name}。可选: {', '.join(defs)}"
+            )
+        return name
+
+    async def _do_start(self, name: str) -> str:
+        """启动单个 shim（不写配置，不影响其他 shim）。"""
+        self._require_name(name)
+        node = self._node_exe()
+        if node is None:
+            raise RuntimeError("找不到 node，请在配置里指定 advanced.node_path")
+        # 手动启动 = 解除临时停用
+        self._disabled_names().discard(name)
+        ok = await self._start_shim(name, node)
+        if not ok:
+            raise RuntimeError(f"{name} 启动失败，看日志")
+        await asyncio.sleep(1.5)
+        if self._auto_register():
+            await self._register_provider(name)
+        return f"{name} 已启动（:{self._port(name)}）"
+
+    async def _do_stop(self, name: str) -> str:
+        """停止单个 shim（不写配置，不影响其他 shim）。"""
+        self._require_name(name)
+        self._disabled_names().add(name)
+
+        proc = self.procs.get(name)
+        if proc is None or proc.poll() is not None:
+            self.procs.pop(name, None)
+            # 不是插件启动的（例如你手动跑的），只标记停用，不动进程
+            raise RuntimeError(
+                f"{name} 不是由插件启动的，无法停止。"
+                f"已标记为停用，下次插件重启不会再拉起它。"
+            )
+        self._stop_shim(name, proc)
+        self.procs.pop(name, None)
+
+        # 注销该 shim 的 provider（取消接口监视）
+        removed = await self._unregister_providers(name)
+        suffix = f"，已注销 {removed} 个 provider" if removed else ""
+        return f"{name} 已停止（:{self._port(name)}）{suffix}"
+
+    async def _api_start(self):
+        async def handler():
+            body = await self._api_body()
+            name = str(body.get("name") or "").strip()
+            if not name:
+                raise ValueError("缺少 name 参数")
+            msg = await self._do_start(name)
+            return {"ok": True, "message": msg}
+
+        try:
+            return await self._api_response(await handler())
+        except (ValueError, RuntimeError) as exc:
+            return await self._api_response({"ok": False, "message": str(exc)}, 400)
+
+    async def _api_stop(self):
+        async def handler():
+            body = await self._api_body()
+            name = str(body.get("name") or "").strip()
+            if not name:
+                raise ValueError("缺少 name 参数")
+            msg = await self._do_stop(name)
+            return {"ok": True, "message": msg}
+
+        try:
+            return await self._api_response(await handler())
+        except (ValueError, RuntimeError) as exc:
+            return await self._api_response({"ok": False, "message": str(exc)}, 400)
+
+    async def _api_restart(self):
+        async def handler():
+            body = await self._api_body()
+            name = str(body.get("name") or "").strip()
+            if not name:
+                raise ValueError("缺少 name 参数")
+            try:
+                await self._do_stop(name)
+            except RuntimeError:
+                pass  # 没在跑也允许重启（等于启动）
+            msg = await self._do_start(name)
+            return {"ok": True, "message": msg}
+
+        try:
+            return await self._api_response(await handler())
+        except (ValueError, RuntimeError) as exc:
+            return await self._api_response({"ok": False, "message": str(exc)}, 400)
+
+    async def _api_toggle(self):
+        """一键切换：运行中就停，停止中就起。"""
+
+        async def handler():
+            body = await self._api_body()
+            name = str(body.get("name") or "").strip()
+            if not name:
+                raise ValueError("缺少 name 参数")
+            self._require_name(name)
+            port = self._port(name)
+            running = not await port_free_async(port)
+            if running:
+                msg = await self._do_stop(name)
+                return {"ok": True, "message": msg, "running": False}
+            msg = await self._do_start(name)
+            return {"ok": True, "message": msg, "running": True}
+
+        try:
+            return await self._api_response(await handler())
+        except (ValueError, RuntimeError) as exc:
+            return await self._api_response({"ok": False, "message": str(exc)}, 400)

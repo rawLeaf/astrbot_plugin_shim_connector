@@ -317,6 +317,77 @@ qwen3.8-flash
 | 只想用 Qoder | 关掉 workbuddy / trae 的 `enable` |
 | 只想避开慢模型 | 别填 `deepseek-v4-pro`（深度推理慢） |
 
+## WebUI 热启停（v1.4.0 新增）
+
+**单个 shim 的启停不需要重启 AstrBot。**
+
+插件注册了 4 个 Web API，插件页可以直接调：
+
+| 接口 | 方法 | 作用 |
+|---|---|---|
+| `/astrbot_plugin_shim_connector/status` | GET | 每个 shim 的启用/运行状态 |
+| `/astrbot_plugin_shim_connector/start` | POST | 启动指定 shim |
+| `/astrbot_plugin_shim_connector/stop` | POST | 停止指定 shim |
+| `/astrbot_plugin_shim_connector/restart` | POST | 重启指定 shim |
+| `/astrbot_plugin_shim_connector/toggle` | POST | 运行中就停，停着就起 |
+
+请求体：
+
+```json
+{ "name": "trae" }
+```
+
+响应：
+
+```json
+{ "ok": true, "message": "trae 已启动（:8788）" }
+```
+
+### 热启停做了什么
+
+**停止一个 shim 时**：
+
+1. 杀掉该 shim 的进程
+2. **注销它注册的 provider 和 provider_source**（从 AstrBot 配置里移除）
+3. 标记为临时停用，**其他 shim 完全不受影响**
+
+**启动一个 shim 时**：
+
+1. 解除临时停用标记
+2. 起进程
+3. 重新探测模型并注册 provider
+
+### 临时停用的语义
+
+| 操作 | 效果 |
+|---|---|
+| WebUI 点停止 | **仅本次运行有效**，不写配置文件 |
+| 重启 AstrBot | 按配置文件走，临时停用失效 |
+
+**想让停用持久化**：到配置页把对应 shim 的「启用」关掉。
+
+### 用 curl 测
+
+```bash
+# 看状态
+curl -H "Authorization: Bearer <你的 WebUI token>" \
+  http://127.0.0.1:6185/astrbot_plugin_shim_connector/status
+
+# 停 trae
+curl -X POST -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <token>" \
+  -d '{"name":"trae"}' \
+  http://127.0.0.1:6185/astrbot_plugin_shim_connector/stop
+
+# 起 trae
+curl -X POST -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <token>" \
+  -d '{"name":"trae"}' \
+  http://127.0.0.1:6185/astrbot_plugin_shim_connector/start
+```
+
+---
+
 ## 命令
 
 ```
@@ -330,6 +401,9 @@ qwen3.8-flash
 ```
 
 需要管理员权限。
+
+> 注意：`/shim stop` 会停掉**所有**由插件启动的 shim。
+> 只想停一个，用上面的 WebUI 接口。
 
 ## provider 是怎么注册的
 
@@ -490,7 +564,7 @@ provider = [{
 
 ## 变更日志
 
-当前版本 **1.3.2** —— 完整变更见 [CHANGELOG.md](CHANGELOG.md)。
+当前版本 **1.4.0** —— 完整变更见 [CHANGELOG.md](CHANGELOG.md)。
 
 ---
 
