@@ -325,6 +325,19 @@ Invoke-RestMethod "http://127.0.0.1:8788/v1/chat/completions" -Method Post `
 
 ---
 
+### 备份不能放进 plugins/ 里
+
+AstrBot 会把 `data/plugins/` 下**每个子目录**当插件扫。备份目录放在里面会被当成
+残缺插件反复加载，报 `No module named ...bak-...`，面板出现「加载失败插件」。
+
+- ❌ `data/plugins/<插件名>.bak-<时间戳>/`
+- ✅ `D:\<备份盘>\backups\<插件名>-<时间戳>/`
+
+删除后**必须重启 AstrBot**，失败记录缓存在内存里，光删目录面板还在。
+详见 `TROUBLESHOOTING.md` 第 1.5 节。
+
+---
+
 ## 已知限制
 
 | 限制 | 说明 |

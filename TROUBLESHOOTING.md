@@ -53,6 +53,97 @@ AstrBot → provider(<source_id>/<model>) → http://127.0.0.1:<port>/v1 → shi
 
 ---
 
+## 1.5 【常见事故】备份目录建在 plugins/ 里 → 插件加载失败
+
+### 症状
+
+插件页出现一个诡异的失败项，名字带 `.bak-` 之类的时间戳后缀：
+
+```
+加载失败插件（1）
+astrbot_plugin_shim_connector.bak-2026-10-31T0758
+No module named 'data.plugins.astrbot_plugin_shim_connector.bak-2026-10-31T0758'
+```
+
+日志反复出现：
+
+```
+Loading plugin astrbot_plugin_shim_connector.bak-2026-10-31T0758 ...
+could not recover from instantiation
+Failed to import plugin ...: No module named ...
+```
+
+### 根因
+
+**AstrBot 会扫描 `data/plugins/` 下的每一个子目录当作插件。**
+如果你把备份目录建在 plugins/ 里面，它就会被当成一个残缺插件反复加载。
+
+```
+data/plugins/
+├── astrbot_plugin_shim_connector/                 ← 正式插件
+└── astrbot_plugin_shim_connector.bak-20261031/    ← ❌ 备份，被当成插件扫了
+```
+
+备份目录里通常没有正确的 `main.py` / `metadata.yaml`（或路径结构已变），
+所以必然 `ModuleNotFoundError`。
+
+### 处理
+
+**第 1 步：删除 plugins/ 里的备份目录**
+
+```powershell
+# 先确认目标（务必看输出）
+Get-ChildItem 'D:\<AstrBot>\data\plugins' -Directory |
+    Where-Object { $_.Name -match '\.bak-|\.old|副本' } |
+    Select-Object FullName, @{n='MB';e={[math]::Round((Get-ChildItem $_.FullName -Recurse -Force -File -EA SilentlyContinue | Measure-Object Length -Sum).Sum/1MB,2)}}
+```
+
+确认后**移到 plugins 外面**（不要直接删，留个后路）：
+
+```powershell
+$trash = "D:\_trash_" + (Get-Date -Format yyyyMMdd_HHmmss)
+New-Item -ItemType Directory $trash -Force | Out-Null
+Get-ChildItem 'D:\<AstrBot>\data\plugins' -Directory |
+    Where-Object { $_.Name -match '\.bak-' } |
+    ForEach-Object { Move-Item $_.FullName (Join-Path $trash $_.Name) -Force }
+```
+
+**第 2 步：重启 AstrBot**
+
+失败记录缓存在内存里的星标管理器，**光删目录不够**，必须重启才会从面板消失。
+
+```powershell
+D:\<AstrBot>\停止-AstrBot.bat
+D:\<AstrBot>\启动-AstrBot.bat
+```
+
+**第 3 步：验证**
+
+重启后到插件页看「加载失败插件」应该为空，日志搜 `.bak-` 不再有新记录。
+
+### 正确做法
+
+**备份必须放在 AstrBot 扫描范围之外。**
+
+| | 路径 |
+|---|---|
+| ❌ 错 | `D:\<AstrBot>\data\plugins\<插件名>.bak-<时间戳>\` |
+| ✅ 对 | `D:\<备份盘>\backups\<插件名>-<时间戳>\` |
+
+推荐的备份命令：
+
+```powershell
+$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+$src   = 'D:\<AstrBot>\data\plugins\astrbot_plugin_shim_connector'
+$dst   = "D:\<备份盘>\backups\astrbot_plugin_shim_connector-$stamp"
+
+New-Item -ItemType Directory (Split-Path $dst) -Force | Out-Null
+Copy-Item $src $dst -Recurse -Force
+Write-Output "备份完成: $dst"
+```
+
+---
+
 ## 2. 第二层：shim 没起来
 
 ### 症状
