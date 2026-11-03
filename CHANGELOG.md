@@ -7,42 +7,6 @@
 
 ---
 
-## [1.5.0] — 2026-11-03
-
-### 新增
-
-- **配置热重载**：**点保存即生效，不用重启 AstrBot**。
-  插件每 2 秒检查配置文件的 mtime，变化后重新读取并做**差分启停**：
-  - 只对「启用」状态变化的 shim 执行启动/停止
-  - 其他 shim 完全不受影响，不重启
-  - 停止时自动注销对应 provider
-
-  为此新增：
-  - `_conf_file_path()` — 定位插件配置文件（`<data>/config/<插件名>_config.json`）
-  - `_reload_config_from_disk()` — 从磁盘读最新配置
-  - `_reconcile(reason)` — 差分启停
-  - `_watch_config_loop()` — 2 秒轮询循环
-  - `_applied` 基线 — 记录上次生效状态，用于判断"变了什么"
-
-### 说明
-
-AstrBot 的 `save_config()` **没有变更回调/事件**，`Star` 基类也只有
-`initialize`/`terminate` 两个钩子。所以只能轮询文件 mtime —— 这是
-在不改 AstrBot 的前提下唯一可行的方案。
-
-只对「启用」开关热生效。改端口/token/node_path 仍需重启，
-因为它们在启动 shim 进程时读取。
-
-### 修复
-
-- `_conf_file_path()` 初版误用「主配置同目录」，实际插件配置在
-  `<data>/config/` 子目录。已改为优先找 `config/xxx_config.json`，
-  兼容旧布局。
-- `_reconcile()` 首次运行时若无基线，会把「配置里本来就关闭」
-  误判成「需要停止」。改为先建基线不动作。
-
----
-
 ## [1.4.0] — 2026-11-03
 
 ### 新增
@@ -61,6 +25,43 @@ AstrBot 的 `save_config()` **没有变更回调/事件**，`Star` 基类也只�
 
 - **临时停用机制**：WebUI 停止的 shim 只记在内存（`_temp_disabled`），
   不写配置文件。重启 AstrBot 后按配置走。想让停用持久化请改配置页。
+
+
+### 新增（续）：配置热重载
+
+**点保存即生效，不用重启 AstrBot。**
+
+插件每 2 秒检查配置文件的 mtime，变化后重新读取并做**差分启停**：
+
+- 只对「启用」状态变化的 shim 执行启动/停止
+- 其他 shim 完全不受影响，不重启
+- 停止时自动注销对应 provider
+
+为此新增：
+
+| 方法 | 作用 |
+|---|---|
+| `_conf_file_path()` | 定位 `<data>/config/<插件名>_config.json` |
+| `_reload_config_from_disk()` | 从磁盘读最新配置 |
+| `_reconcile(reason)` | 差分启停 |
+| `_watch_config_loop()` | 2 秒轮询 |
+| `_applied` 基线 | 记录上次生效状态 |
+
+**限制**：只有「启用」开关热生效。改端口 / token / node_path 仍需重启
+（那些在启动 shim 进程时读取）。
+
+### 说明：为什么用轮询
+
+AstrBot 的 `save_config()` **没有变更回调/事件**，`Star` 基类也只有
+`initialize` / `terminate` 两个钩子。所以只能轮询文件 mtime ——
+在不改 AstrBot 的前提下，这是唯一可行方案。
+
+### 修复（自查发现）
+
+- `_conf_file_path()` 初版误用「主配置同目录」，实际插件配置在
+  `<data>/config/` 子目录。已改为优先找 `config/xxx_config.json`。
+- `_reconcile()` 首次运行若无基线，会把「配置里本来就关闭」
+  误判成「需要停止」。改为先建基线不动作。
 
 ### 变更
 
@@ -353,8 +354,7 @@ Trae 实测真实对话返回正常（`DeepSeek-V4-Flash-Official`）。
 
 | 版本 | commit | 要点 |
 |---|---|---|
-| 1.5.0 | 待定 | 配置热重载：点保存即差分启停 |
-| 1.4.0 | 待定 | WebUI 热启停 + 停止时注销 provider |
+| 1.4.0 | 待定 | WebUI 热启停 + 配置热重载（点保存即生效） | WebUI 热启停 + 停止时注销 provider |
 | 1.3.2 | 待定 | 免责声明强化；LICENSE + MIT 署名补齐；port_free 异步；删 README 版本历史 |
 | 1.3.1 | `e9fc6f9` | 总闸+分开关；自定义 shim |
 | 1.3.0 | `86742ff` | 模型可选（models 配置项） |

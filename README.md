@@ -317,7 +317,7 @@ qwen3.8-flash
 | 只想用 Qoder | 关掉 workbuddy / trae 的 `enable` |
 | 只想避开慢模型 | 别填 `deepseek-v4-pro`（深度推理慢） |
 
-## 配置热重载（v1.5.0 新增）
+## 配置热重载
 
 **点保存就生效，不用重启 AstrBot。**
 
@@ -358,7 +358,7 @@ qwen3.8-flash
 
 ---
 
-## WebUI 热启停（v1.4.0 新增）
+## WebUI 热启停
 
 **单个 shim 的启停不需要重启 AstrBot。**
 
@@ -605,7 +605,7 @@ provider = [{
 
 ## 变更日志
 
-当前版本 **1.5.0** —— 完整变更见 [CHANGELOG.md](CHANGELOG.md)。
+当前版本 **1.4.0** —— 完整变更见 [CHANGELOG.md](CHANGELOG.md)。
 
 ---
 
