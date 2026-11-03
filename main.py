@@ -451,11 +451,46 @@ class ShimConnector(Star):
             return
 
         all_defs = self._all_defs()
+        prev_alive = self._load_prev_alive()
         started = []
+        reused = []
+        stopped = []
+
         for name in all_defs:
-            if not self._effective_enabled(name):
-                logger.debug(f"[shim_connector] {name} 未启用或被临时停用，跳过")
+            port = self._port(name)
+            running = not await port_free_async(port)
+            want = self._effective_enabled(name)
+
+            # 情况 A：配置里禁用，但还在跑 → 停掉
+            if not want and running:
+                proc = self.procs.get(name)
+                if proc is not None:
+                    self._stop_shim(name, proc)
+                    self.procs.pop(name, None)
+                else:
+                    # 重载后 procs 是空的，按端口找进程停
+                    self._stop_by_port(name)
+                stopped.append(name)
+                logger.info(f"[shim_connector] {name} 已从配置禁用，停止")
+                await self._unregister_providers(name)
                 continue
+
+            # 情况 B：配置里禁用，没在跑 → 什么都不做
+            if not want:
+                continue
+
+            # 情况 C：配置里启用，且已经在跑 → 复用，不重启
+            if running:
+                reused.append(name)
+                # 拿不到 Popen 句柄（重载后 procs 是空的），
+                # 但端口在监听说明 shim 活着，直接注册 provider 即可
+                started.append(name)
+                logger.info(
+                    f"[shim_connector] {name} 端口 {port} 已在监听，复用（不重启）"
+                )
+                continue
+
+            # 情况 D：配置里启用，但没在跑 → 启动
             ok = await self._start_shim(name, node)
             if ok:
                 started.append(name)
@@ -477,6 +512,14 @@ class ShimConnector(Star):
         for name in all_defs:
             self._applied[name] = self._enabled(name)
 
+        if reused or stopped:
+            logger.info(
+                f"[shim_connector] 本次加载：复用 {len(reused)} 个"
+                f"（{', '.join(reused) if reused else '无'}），"
+                f"停止 {len(stopped)} 个"
+                f"（{', '.join(stopped) if stopped else '无'}）"
+            )
+
         # 启动配置监视（点保存后自动生效，不用重启）
         conf = self._conf_file_path()
         try:
@@ -490,8 +533,22 @@ class ShimConnector(Star):
             )
 
     async def terminate(self):
-        """插件卸载时：停掉监视任务和所有 shim。"""
-        # 先停监视，避免它在卸载过程中触发重启
+        """插件重载/卸载时调用。
+
+        **不杀 shim 进程。** 原因：
+        AstrBot 面板保存配置后会调 plugin_manager.reload()，
+        它会走到这里。如果在这里杀掉全部 shim，用户改一个开关
+        就会导致所有 shim 重启 —— 这正是不想要的。
+
+        所以这里只做两件事：
+          1. 停掉配置监视任务
+          2. 把当前进程表写到磁盘，供下次 initialize 复用
+
+        真正的停止在 initialize 里按新配置决定：
+          - 配置里禁用的 → 停掉
+          - 配置里启用的且端口在监听 → 复用（不重启）
+          - 配置里启用的但没在跑 → 启动
+        """
         task = getattr(self, "_cfg_watch_task", None)
         if task is not None and not task.done():
             task.cancel()
@@ -501,11 +558,112 @@ class ShimConnector(Star):
                 pass
         self._cfg_watch_task = None
 
-        for name, proc in list(self.procs.items()):
-            self._stop_shim(name, proc)
+        # 记录仍在运行的 shim 名字（不杀进程）
+        alive = [
+            name
+            for name, proc in self.procs.items()
+            if proc is not None and proc.poll() is None
+        ]
+        try:
+            self._state_file().write_text(
+                json.dumps({"alive": alive}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[shim_connector] 写状态文件失败: {exc}")
+        logger.info(
+            f"[shim_connector] terminate：保留 {len(alive)} 个运行中的 shim"
+            f"（{', '.join(alive) if alive else '无'}），交给下次 initialize 复用"
+        )
         self.procs.clear()
         self.registered.clear()
         self._applied.clear()
+
+    @staticmethod
+    def _pid_listening_on(port: int) -> int | None:
+        """找出正在监听某端口的进程 PID（跨平台，用标准库）。
+
+        Args:
+            port: 端口号。
+
+        Returns:
+            PID；找不到返回 None。
+        """
+        import re as _re
+
+        try:
+            if sys.platform == "win32":
+                out = subprocess.run(
+                    ["netstat", "-ano"],
+                    capture_output=True,
+                    text=True,
+                    timeout=8,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                ).stdout
+                for line in out.splitlines():
+                    if f":{port} " not in line and not line.rstrip().endswith(str(port)):
+                        continue
+                    if "LISTENING" not in line.upper():
+                        continue
+                    parts = line.split()
+                    if parts and parts[-1].isdigit():
+                        return int(parts[-1])
+            else:
+                out = subprocess.run(
+                    ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+                    capture_output=True,
+                    text=True,
+                    timeout=8,
+                ).stdout.strip()
+                if out:
+                    return int(out.splitlines()[0])
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+    def _stop_by_port(self, name: str) -> bool:
+        """按端口找到监听进程并停掉（用于重载后丢失句柄的情况）。
+
+        Args:
+            name: shim 名。
+
+        Returns:
+            True 表示确实停掉了一个进程。
+        """
+        port = self._port(name)
+        pid = self._pid_listening_on(port)
+        if pid is None:
+            return False
+        try:
+            # 优先用 psutil 按 PID 杀（比 taskkill 干净）
+            child = subprocess.Popen(
+                ["taskkill", "/PID", str(pid), "/F"] if sys.platform == "win32" else ["kill", "-9", str(pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0,
+            )
+            child.wait(timeout=8)
+            logger.info(f"[shim_connector] 已按端口停止 {name}（:{port} pid={pid}）")
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[shim_connector] 按端口停止 {name} 失败: {exc}")
+            return False
+
+    def _state_file(self) -> Path:
+        """记录运行中 shim 的状态文件（重载时复用）。"""
+        return self._log_dir() / ".running.json"
+
+    def _load_prev_alive(self) -> set[str]:
+        """读上次 terminate 时仍活着的 shim 名字。"""
+        try:
+            path = self._state_file()
+            if not path.is_file():
+                return set()
+            data = json.loads(path.read_text(encoding="utf-8"))
+            alive = data.get("alive") or []
+            return {str(x) for x in alive if isinstance(x, str)}
+        except Exception:  # noqa: BLE001
+            return set()
 
     def _stop_shim(self, name: str, proc: subprocess.Popen) -> None:
         """停一个 shim 进程（只影响这一个）。"""
