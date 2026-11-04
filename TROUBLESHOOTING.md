@@ -346,6 +346,153 @@ Invoke-RestMethod -Uri "http://127.0.0.1:8788/v1/chat/completions" -Method Post 
 
 ---
 
+## 4.5 轮换层全部候选失败（vision / llm_pool）
+
+### 症状
+
+```
+vision_rotator 的候选模型全部失败
+代码块
+
+workbuddy_shim/minimax-m3.1-flash   FAIL  empty content
+workbuddy_intl/minimax-m3.1-flash   FAIL  empty content
+qoder_shim/qoder-cn/gfmodel         FAIL  模型排队中
+zhipu_vision                        FAIL  余额不足
+intern_qwen_vision                  FAIL  quota exceeded
+```
+
+### 先分清：哪些能修，哪些不能
+
+| 错误信息 | 性质 | 能否靠代码修 |
+|---|---|---|
+| `余额不足` / `无可用资源包` | 账号欠费 | ❌ 充值，或排到后面 |
+| `quota exceeded` | 配额用尽 | ❌ 等重置，或排到后面 |
+| `模型排队中` / `isQueued` | 上游繁忙 | ❌ 排到后面 |
+| `empty content` | 模型返回空 | ✅ 自动降级 |
+| `transport: AbortError` | 超时 | ✅ 自动降级 |
+| `401 Unauthorized` | 凭据失效 | ⚠️ 重新登录客户端 |
+
+**前三类改代码没用。** 正确做法是把它们排到优先级后面，别让它们挡住正常请求。
+
+### 第 1 步：看 shim 日志，不是插件日志
+
+```powershell
+Get-Content "<AstrBot>\data\plugin_data\astrbot_plugin_shim_connector\vision.log" -Tail 30
+Get-Content "<AstrBot>\data\plugin_data\astrbot_plugin_shim_connector\llm_pool.log" -Tail 30
+```
+
+日志里每行都带完整上游错误，直接能看出是哪一类。
+
+### 第 2 步：统计各候选成功率
+
+```python
+import re
+from collections import defaultdict
+
+LOG = r"<AstrBot>/data/plugin_data/astrbot_plugin_shim_connector/vision.log"
+stat = defaultdict(lambda: {"ok": 0, "fail": 0, "ms": [], "reasons": set()})
+
+for line in open(LOG, encoding="utf-8"):
+    m = re.search(r"\[(vision|llm-pool)-shim\] (\S+) (OK|FAIL) (\d+)ms(.*)", line)
+    if not m:
+        continue
+    _, tid, res, ms, rest = m.groups()
+    if res == "OK":
+        stat[tid]["ok"] += 1
+        stat[tid]["ms"].append(int(ms))
+    else:
+        stat[tid]["fail"] += 1
+        if rest.strip(": "):
+            stat[tid]["reasons"].add(rest.strip(": ")[:60])
+
+rows = []
+for tid, s in stat.items():
+    total = s["ok"] + s["fail"]
+    rate = s["ok"] / total * 100 if total else 0
+    avg = sum(s["ms"]) // len(s["ms"]) if s["ms"] else 0
+    rows.append((rate, tid, s["ok"], s["fail"], avg, s["reasons"]))
+
+print(f"{'候选':42} {'OK':>4} {'FAIL':>5} {'成功率':>7} {'平均':>6}")
+for rate, tid, ok, fail, avg, _ in sorted(rows, reverse=True):
+    print(f"{tid:42} {ok:4} {fail:5} {rate:6.1f}% {avg:5}ms")
+
+print()
+for rate, tid, ok, fail, avg, reasons in sorted(rows, reverse=True):
+    if reasons:
+        print(f"{tid}:")
+        for r in reasons:
+            print(f"  - {r}")
+```
+
+输出直接告诉你该把谁排前面。
+
+### 第 3 步：按统计结果调优先级
+
+到插件配置 → 对应分组（「视觉轮换层」或「通用 LLM 池」）：
+
+1. **轮换策略** 选「按优先级」
+2. **优先级列表** 按成功率从高到低填 provider id
+3. 用不上的（欠费、超限）**直接不填**，它们不会被尝试
+
+例如只留两个最稳的：
+
+```
+workbuddy_shim/minimax-m3.1-flash
+workbuddy_intl/minimax-m3.1-flash
+```
+
+### 第 4 步：确认 provider 还在
+
+```python
+import json
+cfg = json.load(open(r"<AstrBot>/data/cmd_config.json", encoding="utf-8-sig"))
+providers = {p["id"] for p in cfg.get("provider", [])}
+for pid in ["zhipu_vision", "intern_qwen_vision",
+            "workbuddy_shim/minimax-m3.1-flash",
+            "workbuddy_intl/minimax-m3.1-flash",
+            "qoder_shim/qoder-cn/gfmodel"]:
+    print(("OK  " if pid in providers else "MISS") + " " + pid)
+```
+
+如果 shim 启动日志里有 `跳过（provider 不存在）`，就是这个原因。
+
+### 第 5 步：看实时健康状态
+
+```bash
+curl -H "Authorization: Bearer sk-vision-local" http://127.0.0.1:8791/healthz
+curl -H "Authorization: Bearer sk-llm-pool-local" http://127.0.0.1:8792/healthz
+```
+
+返回里有：
+
+```json
+{
+  "strategy": "priority",
+  "fail_threshold": 2,
+  "targets": [
+    {"rank": 1, "id": "...", "cooling": false, "degraded": false, "ok": 148, "fail": 8}
+  ]
+}
+```
+
+- `rank` —— 当前实际尝试顺序
+- `cooling` —— 是否在冷却期
+- `degraded` —— 是否因连续失败被排到最后
+
+### 参考：2026-11-04 实测数据
+
+| 候选 | OK | FAIL | 成功率 | 平均耗时 |
+|---|---|---|---|---|
+| workbuddy_shim/minimax-m3.1-flash | 148 | 8 | **95%** | 8.9s |
+| workbuddy_intl/minimax-m3.1-flash | 127 | 19 | **87%** | 9.1s |
+| zhipu_vision | 125 | 40 | 76% | 5.4s |
+| intern_qwen_vision | 38 | 101 | **27%** | 9.2s |
+| qoder_shim/qoder-cn/gfmodel | 15 | 109 | **12%** | 12.8s |
+
+据此把默认顺序改成了 workbuddy → workbuddy_intl → zhipu → intern_qwen → qoder。
+
+---
+
 ## 5. 按客户端速查
 
 ### WorkBuddy

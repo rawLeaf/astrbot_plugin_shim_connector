@@ -69,6 +69,83 @@
 **前三个不是代码 bug，是账号/上游状态。** 本次改动让它们排在后面，
 不再拖慢正常请求。
 
+### 排查过程（供以后复现）
+
+**症状**：`vision_rotator/vision-auto` 全部候选失败。
+
+**第 1 步：看 shim 日志**（不是插件日志）
+
+```powershell
+Get-Content "<AstrBot>\data\plugin_data\astrbot_plugin_shim_connector\vision.log" -Tail 30
+```
+
+原始报错会直接写明原因：
+
+```
+zhipu_vision FAIL: {"error":{"code":"1113","message":"余额不足或无可用资源包,请充值。"}}
+intern_qwen_vision FAIL: {"error":{"message":"quota exceeded",...}}
+qoder_shim/qoder-cn/gfmodel FAIL: {"error":{"message":"模型排队中: {\"code\":\"10605\"...}"}}
+workbuddy_shim/minimax-m3.1-flash FAIL: empty content
+```
+
+**第 2 步：统计各候选成功率**
+
+```python
+import re
+from collections import defaultdict
+
+stat = defaultdict(lambda: {"ok": 0, "fail": 0, "ms": [], "reasons": set()})
+for line in open(r"<AstrBot>/data/plugin_data/astrbot_plugin_shim_connector/vision.log",
+                 encoding="utf-8"):
+    m = re.search(r"\[vision-shim\] (\S+) (OK|FAIL) (\d+)ms(.*)", line)
+    if not m:
+        continue
+    tid, res, ms, rest = m.groups()
+    if res == "OK":
+        stat[tid]["ok"] += 1
+        stat[tid]["ms"].append(int(ms))
+    else:
+        stat[tid]["fail"] += 1
+        if rest.strip(": "):
+            stat[tid]["reasons"].add(rest.strip(": ")[:60])
+
+for tid, s in sorted(stat.items(), key=lambda kv: -(kv[1]["ok"] / max(1, kv[1]["ok"] + kv[1]["fail"]))):
+    total = s["ok"] + s["fail"]
+    rate = s["ok"] / total * 100 if total else 0
+    avg = sum(s["ms"]) // len(s["ms"]) if s["ms"] else 0
+    print(f"{tid:40} OK={s['ok']:3} FAIL={s['fail']:3} {rate:5.1f}% {avg:5}ms")
+```
+
+输出直接给出该把谁排前面。
+
+**第 3 步：确认 provider 是否还存在**
+
+```python
+import json
+cfg = json.load(open(r"<AstrBot>/data/cmd_config.json", encoding="utf-8-sig"))
+providers = {p["id"] for p in cfg.get("provider", [])}
+for pid in ["zhipu_vision", "intern_qwen_vision",
+            "workbuddy_shim/minimax-m3.1-flash",
+            "workbuddy_intl/minimax-m3.1-flash",
+            "qoder_shim/qoder-cn/gfmodel"]:
+    print(("OK  " if pid in providers else "MISS") + " " + pid)
+```
+
+如果某个 provider 被删了，shim 启动时会打印 `跳过（provider 不存在）`。
+
+### 关键区分：哪些能修，哪些不能
+
+| 错误信息 | 性质 | 能否靠代码修 |
+|---|---|---|
+| `余额不足` / `无可用资源包` | 账号欠费 | ❌ 充值，或排到后面 |
+| `quota exceeded` | 配额用尽 | ❌ 等重置，或排到后面 |
+| `模型排队中` / `isQueued` | 上游繁忙 | ❌ 排到后面 |
+| `empty content` | 模型返回空 | ✅ 已自动降级 |
+| `transport: AbortError` | 超时 | ✅ 已自动降级 |
+| `401 Unauthorized` | 凭据失效 | ⚠️ 需重新登录客户端 |
+
+**只有后三类值得改代码。前三类改代码没用，只能调顺序或换账号。**
+
 ### 验证
 
 | 检查 | 结果 |
@@ -77,6 +154,7 @@
 | fail_threshold 0→1 | ✅ |
 | shim 按自定义优先级启动 | ✅ 1.Q 2.zhipu 3.A |
 | 默认顺序生效 | ✅ |
+| 全部候选失败时的 503 响应含每个目标的失败原因 | ✅ |
 
 ---
 
