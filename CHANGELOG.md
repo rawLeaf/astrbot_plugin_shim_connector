@@ -7,6 +7,55 @@
 
 ---
 
+## [1.4.3] — 2026-11-04
+
+### 新增：LLM 池支持优先级
+
+`llm_pool` 原来只有固定顺序的轮换（round-robin），没法指定「先用哪个」。
+现在支持两种策略，默认 **priority**：
+
+| 策略 | 行为 |
+|---|---|
+| **priority**（默认） | 严格按优先级列表，前面的能用就一直用；冷却或连续失败达阈值才降级 |
+| roundrobin | 每次换下一个，均摊负载 |
+
+### 新增配置项（`llm_pool` 分组）
+
+| 配置 | 类型 | 默认 | 说明 |
+|---|---|---|---|
+| `strategy` | 下拉 | `priority` | 轮换策略 |
+| `priority` | list | 空 | 优先级列表，**靠前的先用**；留空用内置默认顺序 |
+| `fail_threshold` | int | 2 | 连续失败几次就降级到最后（1~20） |
+
+### 实现
+
+- shim 侧（`llm-pool-shim.mjs`）：
+  - 读 `LLM_POOL_STRATEGY` / `LLM_POOL_TARGETS` / `LLM_POOL_FAIL_THRESHOLD`
+  - priority 模式下按列表顺序尝试；`failCount >= FAIL_THRESHOLD` 的排到最后
+  - 成功一次重置 `failCount`
+  - `/healthz` 现在返回 `strategy` / `fail_threshold` / 每个目标的 `rank` 与 `degraded`
+- 插件侧（`main.py`）：
+  - 新增 `_pool_strategy()` / `_pool_priority()` / `_pool_fail_threshold()`
+  - `_start_shim()` 在 `name == "llm_pool"` 时注入上述三个环境变量
+
+### 修复
+
+- `_pool_fail_threshold()` 初版用 `int(x or 2)`，导致配置 `0` 被当成假值回退到 2。
+  改为显式判断 `None` / 空字符串，再 `max(1, min(n, 20))` 夹紧。
+
+### 验证
+
+| 检查 | 结果 |
+|---|---|
+| 默认值（priority / [] / 2） | ✅ |
+| 自定义（roundrobin / 2 项 / 5） | ✅ |
+| 非法策略兜底到 priority | ✅ |
+| fail_threshold 0→1、999→20、abc→2 | ✅ |
+| 多行字符串解析 | ✅ |
+| shim 启动日志按配置顺序列出 | ✅ 1. C 2. B 3. A |
+
+---
+
 ## [1.4.2] — 2026-11-04
 
 ### 性能 / 规范（审查反馈）
@@ -462,6 +511,7 @@ Trae 实测真实对话返回正常（`DeepSeek-V4-Flash-Official`）。
 
 | 版本 | commit | 要点 |
 |---|---|---|
+| 1.4.3 | 待定 | LLM 池支持优先级排序 |
 | 1.4.2 | 待定 | 端口探测异步化；log 目录回退改临时目录 |
 | 1.4.1 | 待定 | 端口变化尊重启用状态；端口冲突正确识别 |
 | 1.4.0 | 待定 | WebUI 热启停 + 配置热重载（点保存即生效） | WebUI 热启停 + 停止时注销 provider |

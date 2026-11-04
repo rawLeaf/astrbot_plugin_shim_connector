@@ -36,22 +36,35 @@ if (!existsSync(CONFIG_FILE)) {
  * 轮换目标。默认值按"自学习任务需要能稳定输出结构化文本"挑选：
  * 都是 chat 模型、都支持 tool_use、都不是限额状态。
  */
+/** 内置默认轮换顺序（按"能稳定输出结构化文本"排的）。 */
+const DEFAULT_TARGET_IDS = [
+  "trae_shim/DeepSeek-V4-Flash-Official",
+  "trae_shim/Doubao-Seed-Code",
+  "workbuddy_shim/space-bunny",
+  "workbuddy_intl/minimax-m3.1-flash",
+  "intern_kimi",
+  "trae_shim/mimo-v2.6-flash",
+  "workbuddy_shim/minimax-m3.1-flash",
+  "trae_shim/qwen3.8-flash",
+  "trae_shim/minimax-m3.1-flash",
+  "trae_shim/glm-5.3-flash",
+];
+
+/**
+ * 轮换策略：
+ *   "priority" —— 按列表顺序，优先用靠前的；前面的挂了/冷却才用后面的（默认）
+ *   "roundrobin" —— 依次轮换，均摊负载
+ */
+const STRATEGY = (process.env.LLM_POOL_STRATEGY ?? "priority").trim().toLowerCase();
+
+/** 优先级模式下的失败降级阈值：连续失败几次就跳到下一个。 */
+const FAIL_THRESHOLD = Number(process.env.LLM_POOL_FAIL_THRESHOLD ?? 2) || 2;
+
 const TARGETS_ENV = process.env.LLM_POOL_TARGETS ?? "";
 const TARGET_IDS =
   TARGETS_ENV.trim() !== ""
     ? TARGETS_ENV.split(",").map((s) => s.trim()).filter(Boolean)
-    : [
-        "trae_shim/DeepSeek-V4-Flash-Official",
-        "trae_shim/Doubao-Seed-Code",
-        "workbuddy_shim/space-bunny",
-        "workbuddy_intl/minimax-m3.1-flash",
-        "intern_kimi",
-        "trae_shim/mimo-v2.6-flash",
-        "workbuddy_shim/minimax-m3.1-flash",
-        "trae_shim/qwen3.8-flash",
-        "trae_shim/minimax-m3.1-flash",
-        "trae_shim/glm-5.3-flash",
-      ];
+    : DEFAULT_TARGET_IDS;
 
 function loadTargets() {
   const raw = readFileSync(CONFIG_FILE, "utf8").replace(/^\uFEFF/, "");
@@ -88,8 +101,9 @@ function loadTargets() {
 
 const targets = loadTargets();
 console.error(
-  "[llm-pool] 轮换目标 " + targets.length + " 个: " + targets.map((t) => t.id).join(", "),
+  "[llm-pool] 策略=" + STRATEGY + "  目标 " + targets.length + " 个（按优先级）:",
 );
+targets.forEach((t, i) => console.error("  " + (i + 1) + ". " + t.id));
 
 let cursor = 0;
 const COOLDOWN_RATE_LIMIT = 60_000;
@@ -198,8 +212,26 @@ async function handleChat(req, res) {
   }
 
   const now = Date.now();
-  const order = [];
-  for (let i = 0; i < n; i += 1) order.push(targets[(cursor + i) % n]);
+
+  // 按策略生成尝试顺序
+  let order;
+  if (STRATEGY === "roundrobin") {
+    // 依次轮换，均摊负载
+    order = [];
+    for (let i = 0; i < n; i += 1) order.push(targets[(cursor + i) % n]);
+  } else {
+    // priority：严格按列表顺序。列表顺序 = 用户配置的优先级。
+    // 前面的可用就一直用它；冷却/连续失败才退到下一个。
+    //
+    // 连续失败达阈值的排到最后，避免每次都先撞墙再降级。
+    const healthy = [];
+    const degraded = [];
+    for (const t of targets) {
+      if (t.failCount >= FAIL_THRESHOLD) degraded.push(t);
+      else healthy.push(t);
+    }
+    order = healthy.concat(degraded);
+  }
 
   const failures = [];
   for (const t of order) {
@@ -218,8 +250,11 @@ async function handleChat(req, res) {
 
     if (r.ok) {
       t.okCount += 1;
+      t.failCount = 0;
       t.cooldownUntil = 0;
-      cursor = (targets.indexOf(t) + 1) % n;
+      if (STRATEGY === "roundrobin") {
+        cursor = (targets.indexOf(t) + 1) % n;
+      }
       const out = r.payload;
       out._llm_target = t.id;
       console.error("[llm-pool] " + t.id + " OK " + ms + "ms");
@@ -269,9 +304,13 @@ const server = createServer((req, res) => {
       ok: true,
       provider: "llm-pool",
       port: PORT,
-      targets: targets.map((t) => ({
+      strategy: STRATEGY,
+      fail_threshold: FAIL_THRESHOLD,
+      targets: targets.map((t, i) => ({
+        rank: i + 1,
         id: t.id,
         cooling: t.cooldownUntil > Date.now(),
+        degraded: t.failCount >= FAIL_THRESHOLD,
         ok: t.okCount,
         fail: t.failCount,
       })),

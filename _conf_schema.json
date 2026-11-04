@@ -202,7 +202,7 @@
   "llm_pool": {
     "description": "通用 LLM 池",
     "type": "object",
-    "hint": "给 self_learning 这类「只能填单个 provider 且无跨 provider 回退」的插件用的兜底层，在 10 个上游之间轮换。",
+    "hint": "给 self_learning 这类「只能填单个 provider 且无跨 provider 回退」的插件用的兜底层。\n\n**默认按优先级**：你排在前面的先用，挂了才降级到后面的。\n也可以在「轮换策略」里改成均摊轮换。",
     "items": {
       "enable": {
         "description": "启用",
@@ -232,6 +232,40 @@
         "type": "string",
         "default": "sk-llm-pool-local",
         "hint": "插件与 shim 之间的认证口令，**两端自动同步，一般不用改**。\n\n它是干什么的：\n  1. 插件启动 shim 时，把它作为环境变量传给 shim（如 TRAE_SHIM_TOKEN）\n  2. shim 用它校验每个请求的 Bearer（只接受这个值）\n  3. 插件注册模型时，把同一个值填进 provider 的 key\n  两边必须一致，否则 AstrBot 调模型会被 shim 拒绝（401）。\n\n安全吗：\n  shim 只绑 127.0.0.1，这个 token 只在本机回环上生效。\n  它不是你的 WorkBuddy / Trae / Qoder 账号密钥，\n  改了也不影响客户端登录。\n\n什么时候需要改：\n  同机跑多套插件实例、需要区分时。否则保持默认即可。",
+        "obvious_hint": true
+      },
+      "strategy": {
+        "description": "轮换策略",
+        "type": "string",
+        "default": "priority",
+        "options": [
+          {
+            "label": "按优先级（靠前的先用）",
+            "value": "priority"
+          },
+          {
+            "label": "轮换均摊",
+            "value": "roundrobin"
+          }
+        ],
+        "hint": "**priority（推荐）**：严格按「优先级列表」顺序，前面的能用就一直用。\n  前面的冷却或连续失败达阈值，才退到下一个。\n  好处：固定用你最信任的模型，行为可预测。\n\n**roundrobin**：每次换下一个，均摊负载。\n  好处：不会把一个账号的额度用光。\n  坏处：每次换模型，输出风格会跳。",
+        "obvious_hint": true
+      },
+      "priority": {
+        "description": "优先级列表",
+        "type": "list",
+        "items": {
+          "type": "string"
+        },
+        "default": [],
+        "hint": "**靠前的优先使用。** 留空 = 用内置默认顺序。\n\n填 provider id，一行一个，例如：\n  trae_shim/DeepSeek-V4-Flash-Official\n  trae_shim/Doubao-Seed-Code\n  workbuddy_shim/space-bunny\n\n怎么查 id：到「服务提供商」页看，格式是 <source_id>/<model>。\n没列进来的目标不会被使用（想用全部就把它们都列上）。",
+        "obvious_hint": true
+      },
+      "fail_threshold": {
+        "description": "降级阈值",
+        "type": "int",
+        "default": 2,
+        "hint": "priority 模式下，某个目标**连续失败几次**就排到最后。\n\n  2（默认）—— 失败 2 次就降级，反应快\n  5 —— 更宽容，适合偶发超时的场景\n\n成功一次会自动重置计数。",
         "obvious_hint": true
       }
     }

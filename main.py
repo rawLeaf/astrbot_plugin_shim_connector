@@ -302,6 +302,44 @@ class ShimConnector(Star):
         section = self.config.get(name, {}) if isinstance(self.config, dict) else {}
         return str(section.get("token") or self._all_defs()[name]["token"])
 
+    def _pool_strategy(self) -> str:
+        """llm_pool 的轮换策略。
+
+        Returns:
+            "priority"（默认，按优先级）或 "roundrobin"（轮换均摊）。
+        """
+        section = self.config.get("llm_pool", {}) if isinstance(self.config, dict) else {}
+        raw = str(section.get("strategy") or "priority").strip().lower()
+        return raw if raw in ("priority", "roundrobin") else "priority"
+
+    def _pool_priority(self) -> list[str]:
+        """llm_pool 的优先级列表（靠前的先用）。
+
+        留空表示用 shim 内置的默认顺序。
+
+        Returns:
+            provider id 列表，形如 ["trae_shim/xxx", ...]。
+        """
+        section = self.config.get("llm_pool", {}) if isinstance(self.config, dict) else {}
+        return self._as_str_list(section.get("priority"))
+
+    def _pool_fail_threshold(self) -> int:
+        """llm_pool 的降级阈值：连续失败几次就排到最后。
+
+        Returns:
+            正整数，默认 2，限制在 1~20。
+        """
+        section = self.config.get("llm_pool", {}) if isinstance(self.config, dict) else {}
+        raw = section.get("fail_threshold")
+        if raw is None or raw == "":
+            n = 2
+        else:
+            try:
+                n = int(raw)
+            except (TypeError, ValueError):
+                n = 2
+        return max(1, min(n, 20))
+
     def _models(self, name: str) -> list[str]:
         """取用户勾选的模型名单。
 
@@ -911,6 +949,15 @@ class ShimConnector(Star):
         # 该 shim 需要的额外环境变量（如 WB_REGION）
         for ek, ev in (spec.get("extra_env") or {}).items():
             env[ek] = str(ev)
+
+        # llm_pool：轮换策略与优先级列表
+        if name == "llm_pool":
+            env["LLM_POOL_STRATEGY"] = self._pool_strategy()
+            order = self._pool_priority()
+            if order:
+                env["LLM_POOL_TARGETS"] = ",".join(order)
+            env["LLM_POOL_FAIL_THRESHOLD"] = str(self._pool_fail_threshold())
+
         env.setdefault("PYTHONIOENCODING", "utf-8")
         env.setdefault("PYTHONUTF8", "1")
         # vision / llm-pool 需要读 AstrBot 配置来发现上游 provider
