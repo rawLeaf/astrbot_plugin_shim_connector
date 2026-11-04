@@ -340,6 +340,44 @@ class ShimConnector(Star):
                 n = 2
         return max(1, min(n, 20))
 
+    def _vision_strategy(self) -> str:
+        """vision 轮换层的策略。
+
+        Returns:
+            "priority"（默认，按优先级）或 "roundrobin"（轮换均摊）。
+        """
+        section = self.config.get("vision", {}) if isinstance(self.config, dict) else {}
+        raw = str(section.get("strategy") or "priority").strip().lower()
+        return raw if raw in ("priority", "roundrobin") else "priority"
+
+    def _vision_priority(self) -> list[str]:
+        """vision 的优先级列表（靠前的先用）。
+
+        留空表示用 shim 内置的默认顺序。
+
+        Returns:
+            provider id 列表。
+        """
+        section = self.config.get("vision", {}) if isinstance(self.config, dict) else {}
+        return self._as_str_list(section.get("priority"))
+
+    def _vision_fail_threshold(self) -> int:
+        """vision 的降级阈值：连续失败几次就排到最后。
+
+        Returns:
+            正整数，默认 2，限制在 1~20。
+        """
+        section = self.config.get("vision", {}) if isinstance(self.config, dict) else {}
+        raw = section.get("fail_threshold")
+        if raw is None or raw == "":
+            n = 2
+        else:
+            try:
+                n = int(raw)
+            except (TypeError, ValueError):
+                n = 2
+        return max(1, min(n, 20))
+
     def _models(self, name: str) -> list[str]:
         """取用户勾选的模型名单。
 
@@ -949,6 +987,14 @@ class ShimConnector(Star):
         # 该 shim 需要的额外环境变量（如 WB_REGION）
         for ek, ev in (spec.get("extra_env") or {}).items():
             env[ek] = str(ev)
+
+        # vision：轮换策略与优先级列表
+        if name == "vision":
+            env["VISION_STRATEGY"] = self._vision_strategy()
+            vorder = self._vision_priority()
+            if vorder:
+                env["VISION_TARGETS"] = ",".join(vorder)
+            env["VISION_FAIL_THRESHOLD"] = str(self._vision_fail_threshold())
 
         # llm_pool：轮换策略与优先级列表
         if name == "llm_pool":

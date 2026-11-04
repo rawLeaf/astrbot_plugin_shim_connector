@@ -47,13 +47,35 @@ const VIRTUAL_MODEL = "vision-auto";
  *   qoder_shim/qoder-cn/gfmodel       3873ms  OK（时好时坏）
  *   workbuddy 的两个 deepseek-v4.1-flash 都是 429 soft_rate，暂时排除
  */
-const TARGET_IDS = [
-  "zhipu_vision",
-  "intern_qwen_vision",
+const DEFAULT_TARGET_IDS = [
+  // 按实测成功率排序（2026-11-04 统计）：
+  //   workbuddy_shim/minimax-m3.1-flash    148 OK / 8 FAIL   95%   8.9s
+  //   workbuddy_intl/minimax-m3.1-flash    127 OK / 19 FAIL  87%   9.1s
+  //   zhipu_vision                         125 OK / 40 FAIL  76%   5.4s（余额不足时全挂）
+  //   intern_qwen_vision                    38 OK / 101 FAIL 27%   9.2s（quota 超限）
+  //   qoder_shim/qoder-cn/gfmodel           15 OK / 109 FAIL 12%  12.8s（排队）
   "workbuddy_shim/minimax-m3.1-flash",
   "workbuddy_intl/minimax-m3.1-flash",
+  "zhipu_vision",
+  "intern_qwen_vision",
   "qoder_shim/qoder-cn/gfmodel",
 ];
+
+/**
+ * 轮换策略：
+ *   "priority" —— 按列表顺序，优先用靠前的；前面的挂了/冷却才用后面的（默认）
+ *   "roundrobin" —— 依次轮换，均摊负载
+ */
+const STRATEGY = (process.env.VISION_STRATEGY ?? "priority").trim().toLowerCase();
+
+/** 优先级模式下的失败降级阈值：连续失败几次就跳到下一个。 */
+const FAIL_THRESHOLD = Number(process.env.VISION_FAIL_THRESHOLD ?? 2) || 2;
+
+const TARGETS_ENV = process.env.VISION_TARGETS ?? "";
+const TARGET_IDS =
+  TARGETS_ENV.trim() !== ""
+    ? TARGETS_ENV.split(",").map((s) => s.trim()).filter(Boolean)
+    : DEFAULT_TARGET_IDS;
 
 function loadTargets() {
   const raw = readFileSync(CONFIG_FILE, "utf8").replace(/^\uFEFF/, "");
@@ -83,9 +105,8 @@ function loadTargets() {
 }
 
 let targets = loadTargets();
-console.error(
-  "[vision-shim] 轮换目标 " + targets.length + " 个: " + targets.map((t) => t.id).join(", "),
-);
+console.error("[vision-shim] 策略=" + STRATEGY + "  目标 " + targets.length + " 个（按优先级）:");
+targets.forEach((t, i) => console.error("  " + (i + 1) + ". " + t.id));
 
 /** 轮换游标：每次成功就往后挪一格，实现"换着使用" */
 let cursor = 0;
@@ -200,8 +221,22 @@ async function handleChat(req, res) {
   }
 
   const now = Date.now();
-  const order = [];
-  for (let i = 0; i < n; i += 1) order.push(targets[(cursor + i) % n]);
+
+  // 按策略生成尝试顺序
+  let order;
+  if (STRATEGY === "roundrobin") {
+    order = [];
+    for (let i = 0; i < n; i += 1) order.push(targets[(cursor + i) % n]);
+  } else {
+    // priority：严格按列表顺序，连续失败达阈值的排到最后
+    const healthy = [];
+    const degraded = [];
+    for (const t of targets) {
+      if (t.failCount >= FAIL_THRESHOLD) degraded.push(t);
+      else healthy.push(t);
+    }
+    order = healthy.concat(degraded);
+  }
 
   const failures = [];
   for (const t of order) {
@@ -224,9 +259,11 @@ async function handleChat(req, res) {
 
     if (r.ok) {
       t.okCount += 1;
+      t.failCount = 0;
       t.cooldownUntil = 0;
-      // 成功后游标挪到它的下一个，实现轮换
-      cursor = (targets.indexOf(t) + 1) % n;
+      if (STRATEGY === "roundrobin") {
+        cursor = (targets.indexOf(t) + 1) % n;
+      }
       const out = r.payload;
       out.model = VIRTUAL_MODEL;
       out._vision_target = t.id;
@@ -256,9 +293,13 @@ const server = createServer((req, res) => {
       ok: true,
       provider: "vision",
       port: PORT,
-      targets: targets.map((t) => ({
+      strategy: STRATEGY,
+      fail_threshold: FAIL_THRESHOLD,
+      targets: targets.map((t, i) => ({
+        rank: i + 1,
         id: t.id,
         cooling: t.cooldownUntil > Date.now(),
+        degraded: t.failCount >= FAIL_THRESHOLD,
         ok: t.okCount,
         fail: t.failCount,
       })),

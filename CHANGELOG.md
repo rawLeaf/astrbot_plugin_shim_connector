@@ -7,6 +7,79 @@
 
 ---
 
+## [1.4.4] — 2026-11-04
+
+### 新增：视觉轮换层支持优先级
+
+`vision_rotator` 原来只有固定顺序轮换，且默认顺序**把最不靠谱的排在最前**：
+`zhipu_vision`（余额不足）和 `intern_qwen_vision`（quota 超限）排 1、2 位，
+每次请求都要先等它们失败，再降到能用的。
+
+现在与 `llm_pool` 一致，支持两种策略（默认 **priority**）：
+
+| 策略 | 行为 |
+|---|---|
+| **priority**（默认） | 严格按优先级列表，前面的能用就一直用；冷却或连续失败达阈值才降级 |
+| roundrobin | 每次换下一个，均摊负载 |
+
+### 默认顺序已按实测成功率重排
+
+2026-11-04 统计（共 689 次调用）：
+
+| 候选 | OK | FAIL | 成功率 | 平均耗时 |
+|---|---|---|---|---|
+| workbuddy_shim/minimax-m3.1-flash | 148 | 8 | **95%** | 8.9s |
+| workbuddy_intl/minimax-m3.1-flash | 127 | 19 | **87%** | 9.1s |
+| zhipu_vision | 125 | 40 | 76% | 5.4s |
+| intern_qwen_vision | 38 | 101 | **27%** | 9.2s |
+| qoder_shim/qoder-cn/gfmodel | 15 | 109 | **12%** | 12.8s |
+
+新默认顺序：**workbuddy_shim → workbuddy_intl → zhipu → intern_qwen → qoder**
+
+### 新增配置项（`vision` 分组）
+
+| 配置 | 类型 | 默认 | 说明 |
+|---|---|---|---|
+| `strategy` | 下拉 | `priority` | 轮换策略 |
+| `priority` | list | 空 | 优先级列表，**靠前的先用**；留空用上面那个内置顺序 |
+| `fail_threshold` | int | 2 | 连续失败几次就降级到最后（1~20） |
+
+### 实现
+
+- shim 侧（`vision-shim.mjs`）：
+  - 读 `VISION_STRATEGY` / `VISION_TARGETS` / `VISION_FAIL_THRESHOLD`
+  - priority 模式下 `failCount >= FAIL_THRESHOLD` 的排到最后
+  - 成功一次重置 `failCount`
+  - `/healthz` 返回 `strategy` / `fail_threshold` / 每目标 `rank` 与 `degraded`
+- 插件侧（`main.py`）：
+  - 新增 `_vision_strategy()` / `_vision_priority()` / `_vision_fail_threshold()`
+  - `_start_shim()` 在 `name == "vision"` 时注入上述三个环境变量
+
+### 说明：失败原因分析
+
+原日志里的四类失败，性质不同：
+
+| 错误 | 性质 | 处理 |
+|---|---|---|
+| `余额不足`（zhipu 1113） | 账号问题 | 优先级调后，或充值 |
+| `quota exceeded`（intern） | 配额用尽 | 优先级调后 |
+| `模型排队中`（qoder 10605） | 上游繁忙 | 优先级调后（12% 成功率） |
+| `empty content` | 模型返回空 | 自动降级到下一个（已支持） |
+
+**前三个不是代码 bug，是账号/上游状态。** 本次改动让它们排在后面，
+不再拖慢正常请求。
+
+### 验证
+
+| 检查 | 结果 |
+|---|---|
+| vision 配置读取（默认/自定义/兜底） | ✅ |
+| fail_threshold 0→1 | ✅ |
+| shim 按自定义优先级启动 | ✅ 1.Q 2.zhipu 3.A |
+| 默认顺序生效 | ✅ |
+
+---
+
 ## [1.4.3] — 2026-11-04
 
 ### 新增：LLM 池支持优先级
@@ -511,6 +584,7 @@ Trae 实测真实对话返回正常（`DeepSeek-V4-Flash-Official`）。
 
 | 版本 | commit | 要点 |
 |---|---|---|
+| 1.4.4 | 待定 | 视觉轮换层支持优先级，默认顺序按实测成功率重排 |
 | 1.4.3 | 待定 | LLM 池支持优先级排序 |
 | 1.4.2 | 待定 | 端口探测异步化；log 目录回退改临时目录 |
 | 1.4.1 | 待定 | 端口变化尊重启用状态；端口冲突正确识别 |

@@ -165,7 +165,7 @@
   "vision": {
     "description": "视觉轮换层",
     "type": "object",
-    "hint": "给「只能填单个 provider」的图片描述配置用的兜底层，在 5 个视觉上游之间轮换。\n\n一般不直接选这里的模型，而是把它配置到 AstrBot 的「图片描述 Provider」里。",
+    "hint": "给视觉任务用的轮换层：多个上游轮流用，一个挂了不影响整体。\n\n**默认按优先级**：排在前面的先用，挂了才降级到后面的。\n内置顺序已按实测成功率排好（workbuddy 两个最稳）。",
     "items": {
       "enable": {
         "description": "启用",
@@ -195,6 +195,40 @@
         "type": "string",
         "default": "sk-vision-local",
         "hint": "插件与 shim 之间的认证口令，**两端自动同步，一般不用改**。\n\n它是干什么的：\n  1. 插件启动 shim 时，把它作为环境变量传给 shim（如 TRAE_SHIM_TOKEN）\n  2. shim 用它校验每个请求的 Bearer（只接受这个值）\n  3. 插件注册模型时，把同一个值填进 provider 的 key\n  两边必须一致，否则 AstrBot 调模型会被 shim 拒绝（401）。\n\n安全吗：\n  shim 只绑 127.0.0.1，这个 token 只在本机回环上生效。\n  它不是你的 WorkBuddy / Trae / Qoder 账号密钥，\n  改了也不影响客户端登录。\n\n什么时候需要改：\n  同机跑多套插件实例、需要区分时。否则保持默认即可。",
+        "obvious_hint": true
+      },
+      "strategy": {
+        "description": "轮换策略",
+        "type": "string",
+        "default": "priority",
+        "options": [
+          {
+            "label": "按优先级（靠前的先用）",
+            "value": "priority"
+          },
+          {
+            "label": "轮换均摊",
+            "value": "roundrobin"
+          }
+        ],
+        "hint": "**priority（推荐）**：严格按「优先级列表」顺序，前面的能用就一直用。\n  前面的冷却或连续失败达阈值，才退到下一个。\n\n**roundrobin**：每次换下一个，均摊负载。",
+        "obvious_hint": true
+      },
+      "priority": {
+        "description": "优先级列表",
+        "type": "list",
+        "items": {
+          "type": "string"
+        },
+        "default": [],
+        "hint": "**靠前的优先使用。** 留空 = 用内置默认顺序（已按实测成功率排好）。\n\n内置默认顺序（2026-11-04 实测）：\n  1. workbuddy_shim/minimax-m3.1-flash    95%  8.9s\n  2. workbuddy_intl/minimax-m3.1-flash    87%  9.1s\n  3. zhipu_vision                         76%  5.4s（余额不足时会全挂）\n  4. intern_qwen_vision                   27%  9.2s（quota 超限）\n  5. qoder_shim/qoder-cn/gfmodel          12% 12.8s（排队）\n\n想只用前两个就只填那两个，后面的不会被尝试。",
+        "obvious_hint": true
+      },
+      "fail_threshold": {
+        "description": "降级阈值",
+        "type": "int",
+        "default": 2,
+        "hint": "priority 模式下，某个目标**连续失败几次**就排到最后。\n\n  2（默认）—— 失败 2 次就降级，反应快\n  5 —— 更宽容，适合偶发超时的场景\n\n成功一次会自动重置计数。",
         "obvious_hint": true
       }
     }
