@@ -19,8 +19,8 @@ import aiohttp
 import json
 import os
 import shutil
-import socket
 import subprocess
+import tempfile
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -140,21 +140,6 @@ async def port_free_async(port: int, timeout: float = 0.5) -> bool:
     # 连上了 = 有人监听
     return False
 
-
-def port_free(port: int) -> bool:
-    """同步版端口探测，仅供纯同步上下文用（如状态文本渲染）。
-
-    异步路径请用 :func:`port_free_async`。
-
-    Args:
-        port: 要检查的端口。
-
-    Returns:
-        True 表示可以绑定。
-    """
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.settimeout(0.5)
-        return sock.connect_ex(("127.0.0.1", port)) != 0
 
 
 class ShimConnector(Star):
@@ -469,9 +454,9 @@ class ShimConnector(Star):
             # 注意：杀完旧进程后，**是否在新端口启动要看 want**。
             # 用户可能只是改了端口，同时把 shim 禁用了 —— 那就不该起。
             if port_changed:
-                old_pid = self._pid_listening_on(prev_port)
+                old_pid = await self._pid_listening_on_async(prev_port)
                 if old_pid is not None:
-                    self._kill_pid(old_pid)
+                    await self._kill_pid_async(old_pid)
                     logger.info(
                         f"[shim_connector] {name} 端口 {prev_port} → {port}，"
                         f"已停止旧进程（pid={old_pid}）"
@@ -508,7 +493,7 @@ class ShimConnector(Star):
                     self._stop_shim(name, proc)
                     self.procs.pop(name, None)
                 else:
-                    self._stop_by_port(name)
+                    await self._stop_by_port(name)
                 stopped.append(name)
                 logger.info(f"[shim_connector] {name} 已从配置禁用，停止")
                 await self._unregister_providers(name)
@@ -613,7 +598,7 @@ class ShimConnector(Star):
                     port = self._port(name)
                 except Exception:  # noqa: BLE001
                     continue
-                if self._pid_listening_on(port) is not None:
+                if await self._pid_listening_on_async(port) is not None:
                     alive[name] = port
         try:
             self._state_file().write_text(
@@ -696,7 +681,104 @@ class ShimConnector(Star):
             logger.warning(f"[shim_connector] 杀进程 pid={pid} 失败: {exc}")
             return False
 
-    def _stop_by_port(self, name: str) -> bool:
+    @staticmethod
+    async def _pid_listening_on_async(port: int) -> int | None:
+        """找出正在监听某端口的进程 PID（异步，不阻塞事件循环）。
+
+        用 asyncio.create_subprocess_exec 跑 netstat / lsof，
+        避免在 async 路径里同步阻塞。
+
+        Args:
+            port: 端口号。
+
+        Returns:
+            PID；找不到返回 None。
+        """
+        try:
+            if sys.platform == "win32":
+                proc = await asyncio.create_subprocess_exec(
+                    "netstat",
+                    "-ano",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                try:
+                    out_b, _ = await asyncio.wait_for(proc.communicate(), timeout=8)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    return None
+                out = (out_b or b"").decode("utf-8", "ignore")
+                for line in out.splitlines():
+                    if f":{port} " not in line and not line.rstrip().endswith(str(port)):
+                        continue
+                    if "LISTENING" not in line.upper():
+                        continue
+                    parts = line.split()
+                    if parts and parts[-1].isdigit():
+                        return int(parts[-1])
+            else:
+                proc = await asyncio.create_subprocess_exec(
+                    "lsof",
+                    "-nP",
+                    f"-iTCP:{port}",
+                    "-sTCP:LISTEN",
+                    "-t",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                try:
+                    out_b, _ = await asyncio.wait_for(proc.communicate(), timeout=8)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    return None
+                out = (out_b or b"").decode("utf-8", "ignore").strip()
+                if out:
+                    return int(out.splitlines()[0])
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+    @staticmethod
+    async def _kill_pid_async(pid: int) -> bool:
+        """按 PID 杀进程（异步，不阻塞事件循环）。
+
+        Args:
+            pid: 进程 ID。
+
+        Returns:
+            True 表示成功发出终止信号。
+        """
+        try:
+            if sys.platform == "win32":
+                proc = await asyncio.create_subprocess_exec(
+                    "taskkill",
+                    "/PID",
+                    str(pid),
+                    "/F",
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            else:
+                proc = await asyncio.create_subprocess_exec(
+                    "kill",
+                    "-9",
+                    str(pid),
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=8)
+            except asyncio.TimeoutError:
+                proc.kill()
+                return False
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[shim_connector] 杀进程 pid={pid} 失败: {exc}")
+            return False
+
+    async def _stop_by_port(self, name: str) -> bool:
         """按端口找到监听进程并停掉（用于重载后丢失句柄的情况）。
 
         Args:
@@ -706,10 +788,10 @@ class ShimConnector(Star):
             True 表示确实停掉了一个进程。
         """
         port = self._port(name)
-        pid = self._pid_listening_on(port)
+        pid = await self._pid_listening_on_async(port)
         if pid is None:
             return False
-        if self._kill_pid(pid):
+        if await self._kill_pid_async(pid):
             logger.info(f"[shim_connector] 已按端口停止 {name}（:{port} pid={pid}）")
             return True
         return False
@@ -815,7 +897,7 @@ class ShimConnector(Star):
                 )
                 return True
             # 换端口/首次启动场景：端口被占说明冲突，不能假装成功
-            pid = self._pid_listening_on(port)
+            pid = await self._pid_listening_on_async(port)
             logger.error(
                 f"[shim_connector] {name} 目标端口 {port} 已被占用"
                 f"（pid={pid}），无法启动。"
@@ -1041,13 +1123,25 @@ class ShimConnector(Star):
                 logger.warning(f"[shim_connector] 配置监视异常: {exc}")
 
     def _log_dir(self) -> Path:
-        """日志目录：优先 plugin_data，其次插件目录下 logs/。"""
+        """日志目录。
+
+        规范位置是 <AstrBot>/data/plugin_data/<插件名>/，
+        这是 AstrBot 官方约定的插件持久化目录。
+
+        如果该位置不可写（极少见），退回系统临时目录下的同名子目录，
+        **不再写进插件安装目录** —— 插件目录应保持只读语义，
+        写进去会污染插件、也会被插件更新覆盖。
+        """
         base = PLUGIN_DIR.parent.parent / "plugin_data" / PLUGIN_DIR.name
         try:
             base.mkdir(parents=True, exist_ok=True)
             return base
-        except Exception:  # noqa: BLE001
-            fb = PLUGIN_DIR / "logs"
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                f"[shim_connector] plugin_data 目录不可写（{exc}），"
+                f"改用系统临时目录"
+            )
+            fb = Path(tempfile.gettempdir()) / PLUGIN_DIR.name
             fb.mkdir(parents=True, exist_ok=True)
             return fb
 
@@ -1305,7 +1399,7 @@ class ShimConnector(Star):
         action = args[1] if len(args) > 1 else "status"
 
         if action == "status":
-            yield event.plain_result(self._status_text())
+            yield event.plain_result(await self._status_text())
             return
 
         if action == "start":
@@ -1326,14 +1420,14 @@ class ShimConnector(Star):
             for name in self._all_defs():
                 if self._enabled(name):
                     await self._register_provider(name)
-            yield event.plain_result("\n".join(results) + "\n\n" + self._status_text())
+            yield event.plain_result("\n".join(results) + "\n\n" + await self._status_text())
             return
 
         if action == "stop":
             for name, proc in list(self.procs.items()):
                 self._stop_shim(name, proc)
             self.procs.clear()
-            yield event.plain_result("已停止所有由插件启动的 shim。\n\n" + self._status_text())
+            yield event.plain_result("已停止所有由插件启动的 shim。\n\n" + await self._status_text())
             return
 
         if action == "restart":
@@ -1352,7 +1446,7 @@ class ShimConnector(Star):
             for name in self._all_defs():
                 if self._enabled(name):
                     await self._register_provider(name)
-            yield event.plain_result("已重启。\n\n" + self._status_text())
+            yield event.plain_result("已重启。\n\n" + await self._status_text())
             return
 
         if action == "logs":
@@ -1387,13 +1481,13 @@ class ShimConnector(Star):
             "未知操作 {0}。用法：/shim [status|start|stop|restart|logs]".format(action)
         )
 
-    def _status_text(self) -> str:
-        """生成状态文本。"""
+    async def _status_text(self) -> str:
+        """生成状态文本（异步探测端口，不阻塞事件循环）。"""
         lines = ["本机 shim 状态", ""]
         for name, spec in self._all_defs().items():
             port = self._port(name)
             enabled = self._enabled(name)
-            running = not port_free(port)
+            running = not await port_free_async(port)
             proc = self.procs.get(name)
             pid = proc.pid if proc and proc.poll() is None else "-"
             mark = "[运行]" if running else "[停止]"

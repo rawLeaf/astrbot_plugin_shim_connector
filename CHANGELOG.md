@@ -7,6 +7,42 @@
 
 ---
 
+## [1.4.2] — 2026-11-04
+
+### 性能 / 规范（审查反馈）
+
+- **异步化端口探测**：`initialize` / `terminate` / `_start_shim` / `_stop_by_port`
+  原来在 async 路径里用同步 `subprocess.run`（netstat / lsof，超时 8s），
+  会阻塞事件循环。新增 `_pid_listening_on_async()` / `_kill_pid_async()`
+  基于 `asyncio.create_subprocess_exec`，全部 async 路径改用它。
+  同步版保留给同步上下文（当前已无引用，仅留作扩展）。
+
+- **`_status_text()` 改为 async**：原来用同步 `port_free()`（`connect_ex` 0.5s），
+  现统一走 `port_free_async()`。4 个调用点补 `await`。
+  同步版 `port_free()` 已无引用，删除；随之清理未使用的 `import socket`。
+
+- **`_log_dir()` 回退位置改为临时目录**：原来 plugin_data 不可写时退回
+  插件安装目录下的 `logs/`，会污染插件、也会被插件更新覆盖。
+  改为退回 `tempfile.gettempdir()/<插件名>`，保持插件目录只读语义。
+
+### 说明
+
+未触碰 `db_helper`，未修改 `Conversation` 表；provider 注册仍走
+`provider_manager` + 配置接口，符合 AstrBot 插件规范。
+
+### 验证
+
+| 检查 | 结果 |
+|---|---|
+| 异步 PID 探测（8787/8788/空闲端口） | ✅ 结果与同步版一致 |
+| `port_free_async` | ✅ |
+| `_status_text` 异步返回 | ✅ 11 行，含运行标记 |
+| `_log_dir` 返回 plugin_data 路径 | ✅ |
+| 判定矩阵 6 组回归 | ✅ 全部通过 |
+| async 上下文残留同步调用 | ✅ 0 处 |
+
+---
+
 ## [1.4.1] — 2026-11-04
 
 ### 修复
@@ -426,6 +462,7 @@ Trae 实测真实对话返回正常（`DeepSeek-V4-Flash-Official`）。
 
 | 版本 | commit | 要点 |
 |---|---|---|
+| 1.4.2 | 待定 | 端口探测异步化；log 目录回退改临时目录 |
 | 1.4.1 | 待定 | 端口变化尊重启用状态；端口冲突正确识别 |
 | 1.4.0 | 待定 | WebUI 热启停 + 配置热重载（点保存即生效） | WebUI 热启停 + 停止时注销 provider |
 | 1.3.2 | 待定 | 免责声明强化；LICENSE + MIT 署名补齐；port_free 异步；删 README 版本历史 |
