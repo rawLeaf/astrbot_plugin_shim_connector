@@ -302,6 +302,46 @@ class ShimConnector(Star):
         section = self.config.get(name, {}) if isinstance(self.config, dict) else {}
         return str(section.get("token") or self._all_defs()[name]["token"])
 
+    def _auto_tune(self, name: str) -> bool:
+        """自动调节开关（health score）。
+
+        Args:
+            name: shim 名（vision / llm_pool）。
+
+        Returns:
+            True 表示启用自动调节。
+        """
+        section = self.config.get(name, {}) if isinstance(self.config, dict) else {}
+        return bool(section.get("auto_tune", True))
+
+    def _tune_params(self, name: str) -> dict:
+        """自动调节的四个数值参数。
+
+        Args:
+            name: shim 名。
+
+        Returns:
+            {timeout_penalty, fail_penalty, recover_step, initial_score}
+        """
+        section = self.config.get(name, {}) if isinstance(self.config, dict) else {}
+
+        def _int(key: str, default: int, lo: int, hi: int) -> int:
+            raw = section.get(key)
+            if raw is None or raw == "":
+                return default
+            try:
+                n = int(raw)
+            except (TypeError, ValueError):
+                return default
+            return max(lo, min(hi, n))
+
+        return {
+            "timeout_penalty": _int("timeout_penalty", 25, 1, 100),
+            "fail_penalty": _int("fail_penalty", 12, 1, 100),
+            "recover_step": _int("recover_step", 5, 1, 100),
+            "initial_score": _int("initial_score", 70, 0, 100),
+        }
+
     def _pool_strategy(self) -> str:
         """llm_pool 的轮换策略。
 
@@ -931,6 +971,12 @@ class ShimConnector(Star):
             if vorder:
                 env["VISION_TARGETS"] = ",".join(vorder)
             env["VISION_FAIL_THRESHOLD"] = str(self._vision_fail_threshold())
+            env["VISION_AUTO_TUNE"] = "1" if self._auto_tune("vision") else "0"
+            vp = self._tune_params("vision")
+            env["VISION_TIMEOUT_PENALTY"] = str(vp["timeout_penalty"])
+            env["VISION_FAIL_PENALTY"] = str(vp["fail_penalty"])
+            env["VISION_RECOVER_STEP"] = str(vp["recover_step"])
+            env["VISION_INITIAL_SCORE"] = str(vp["initial_score"])
 
         # llm_pool：轮换策略与优先级列表
         if name == "llm_pool":
@@ -939,6 +985,12 @@ class ShimConnector(Star):
             if order:
                 env["LLM_POOL_TARGETS"] = ",".join(order)
             env["LLM_POOL_FAIL_THRESHOLD"] = str(self._pool_fail_threshold())
+            env["LLM_POOL_AUTO_TUNE"] = "1" if self._auto_tune("llm_pool") else "0"
+            pp = self._tune_params("llm_pool")
+            env["LLM_POOL_TIMEOUT_PENALTY"] = str(pp["timeout_penalty"])
+            env["LLM_POOL_FAIL_PENALTY"] = str(pp["fail_penalty"])
+            env["LLM_POOL_RECOVER_STEP"] = str(pp["recover_step"])
+            env["LLM_POOL_INITIAL_SCORE"] = str(pp["initial_score"])
 
         env.setdefault("PYTHONIOENCODING", "utf-8")
         env.setdefault("PYTHONUTF8", "1")
@@ -1541,6 +1593,8 @@ class ShimConnector(Star):
             ("restart", self._api_restart, ["POST"], "重启指定 shim"),
             ("toggle", self._api_toggle, ["POST"], "切换指定 shim 启停"),
             ("refresh-models", self._api_refresh_models, ["POST"], "探测上游模型"),
+            ("health", self._api_health, ["GET"], "轮换层健康分"),
+            ("reset-health", self._api_reset_health, ["POST"], "重置健康分"),
         )
         for endpoint, handler, methods, desc in routes:
             try:
@@ -1833,6 +1887,86 @@ class ShimConnector(Star):
                         "想让 AstrBot 注册新模型：把配置里的 models 留空"
                         "（= 全部）并重载插件。",
             }
+
+        try:
+            return await self._api_response(await handler())
+        except (ValueError, RuntimeError) as exc:
+            return await self._api_response({"ok": False, "message": str(exc)}, 400)
+
+
+    # ── 健康分（自动调节）─────────────────────────────────────
+
+    async def _proxy_shim(self, name: str, path: str, method: str = "GET") -> dict:
+        """转发请求到 shim 的内部接口。
+
+        Args:
+            name: shim 名。
+            path: shim 上的路径，如 "/healthz"、"/reset-health"。
+            method: GET 或 POST。
+
+        Returns:
+            shim 返回的 JSON。
+
+        Raises:
+            ValueError: shim 名非法或不支持。
+            RuntimeError: shim 未运行或返回非 200。
+        """
+        self._require_name(name)
+        port = self._port(name)
+        if await port_free_async(port):
+            raise RuntimeError(f"{name} 未在运行（端口 {port} 空闲）")
+
+        url = f"http://127.0.0.1:{port}{path}"
+        token = self._token(name)
+        headers = {"Authorization": f"Bearer {token}"}
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.request(
+                    method,
+                    url,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as resp:
+                    text = await resp.text()
+                    if resp.status != 200:
+                        raise RuntimeError(f"shim 返回 HTTP{resp.status}: {text[:200]}")
+                    return json.loads(text)
+        except aiohttp.ClientError as exc:
+            raise RuntimeError(f"请求 shim 失败: {exc}") from exc
+
+    async def _api_health(self):
+        """查某个轮换层的健康分与当前排序。
+
+        查询参数：?name=vision（默认 vision）
+        """
+
+        async def handler():
+            name = "vision"
+            if _quart_request is not None:
+                try:
+                    name = str(_quart_request.args.get("name") or "vision").strip()
+                except Exception:  # noqa: BLE001
+                    pass
+            data = await self._proxy_shim(name, "/healthz")
+            return {"ok": True, "name": name, "shim": data}
+
+        try:
+            return await self._api_response(await handler())
+        except (ValueError, RuntimeError) as exc:
+            return await self._api_response({"ok": False, "message": str(exc)}, 400)
+
+    async def _api_reset_health(self):
+        """把所有目标的健康分重置回初始值。
+
+        请求体：{"name": "vision"}（默认 vision，也可 llm_pool）
+        """
+
+        async def handler():
+            body = await self._api_body()
+            name = str(body.get("name") or "vision").strip()
+            data = await self._proxy_shim(name, "/reset-health", "POST")
+            logger.info(f"[shim_connector] {name} 健康分已重置")
+            return {"ok": True, "name": name, "shim": data}
 
         try:
             return await self._api_response(await handler())

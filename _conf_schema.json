@@ -165,7 +165,7 @@
   "vision": {
     "description": "视觉轮换层",
     "type": "object",
-    "hint": "给视觉任务用的轮换层：多个上游轮流用，一个挂了不影响整体。\n\n**默认按优先级**：排在前面的先用，挂了才降级到后面的。\n内置顺序已按实测成功率排好（workbuddy 两个最稳）。",
+    "hint": "给视觉任务用的轮换层：多个上游轮流用，一个挂了不影响整体。\n\n**默认按优先级 + 自动调节**：排在前面的先用；长期超时的会自动沉到后面，\n好的浮上来。分数存盘，重启不丢。",
     "items": {
       "enable": {
         "description": "启用",
@@ -230,13 +230,48 @@
         "default": 2,
         "hint": "priority 模式下，某个目标**连续失败几次**就排到最后。\n\n  2（默认）—— 失败 2 次就降级，反应快\n  5 —— 更宽容，适合偶发超时的场景\n\n成功一次会自动重置计数。",
         "obvious_hint": true
+      },
+      "auto_tune": {
+        "description": "自动调节",
+        "type": "bool",
+        "default": true,
+        "hint": "**开着就会自己学**：长期超时/失败的模型自动沉到后面，好的浮上来。\n\n怎么算：\n  · 成功一次 +5 分\n  · 超时一次 -25 分（超时最伤，用户等不起）\n  · 其他失败 -12 分\n  · 分数 0~100，初始 70\n\n排序规则：按分数从高到低，同分按「优先级列表」的顺序。\n分数会存到文件，重启不丢。\n\n关掉的话就严格按「优先级列表」的固定顺序，不学习。",
+        "obvious_hint": true
+      },
+      "timeout_penalty": {
+        "description": "超时扣分",
+        "type": "int",
+        "default": 25,
+        "hint": "一次超时扣多少分（1~100，默认 25）。\n\n扣得越狠，超时的模型沉得越快。\n如果上游本来就慢（比如视觉模型要 10-20 秒），可以调小到 10-15，\n避免正常慢但能用的模型被误判。",
+        "obvious_hint": true
+      },
+      "fail_penalty": {
+        "description": "失败扣分",
+        "type": "int",
+        "default": 12,
+        "hint": "一次普通失败（非超时）扣多少分（1~100，默认 12）。\n\n比如返回空内容、HTTP 5xx、解析失败这类。\n比超时扣得轻，因为不一定是模型的问题。",
+        "obvious_hint": true
+      },
+      "recover_step": {
+        "description": "成功加分",
+        "type": "int",
+        "default": 5,
+        "hint": "成功一次加多少分（1~100，默认 5）。\n\n故意加得慢：一次偶然成功不该立刻把分数冲回去，\n要连续稳定几次才能爬回高位。",
+        "obvious_hint": true
+      },
+      "initial_score": {
+        "description": "初始分数",
+        "type": "int",
+        "default": 70,
+        "hint": "新目标（或重置后）的起始分（0~100，默认 70）。\n\n所有目标同分时，就按「优先级列表」的顺序决胜负 ——\n所以填了优先级列表的话，初始顺序仍然是你说了算。",
+        "obvious_hint": true
       }
     }
   },
   "llm_pool": {
     "description": "通用 LLM 池",
     "type": "object",
-    "hint": "给 self_learning 这类「只能填单个 provider 且无跨 provider 回退」的插件用的兜底层。\n\n**默认按优先级**：你排在前面的先用，挂了才降级到后面的。\n也可以在「轮换策略」里改成均摊轮换。",
+    "hint": "给 self_learning 这类「只能填单个 provider 且无跨 provider 回退」的插件用的兜底层。\n\n**默认按优先级 + 自动调节**：排在前面的先用；长期超时的会自动沉到后面。\n也可以在「轮换策略」里改成均摊轮换。",
     "items": {
       "enable": {
         "description": "启用",
@@ -300,6 +335,41 @@
         "type": "int",
         "default": 2,
         "hint": "priority 模式下，某个目标**连续失败几次**就排到最后。\n\n  2（默认）—— 失败 2 次就降级，反应快\n  5 —— 更宽容，适合偶发超时的场景\n\n成功一次会自动重置计数。",
+        "obvious_hint": true
+      },
+      "auto_tune": {
+        "description": "自动调节",
+        "type": "bool",
+        "default": true,
+        "hint": "**开着就会自己学**：长期超时/失败的模型自动沉到后面，好的浮上来。\n\n怎么算：\n  · 成功一次 +5 分\n  · 超时一次 -25 分（超时最伤，用户等不起）\n  · 其他失败 -12 分\n  · 分数 0~100，初始 70\n\n排序规则：按分数从高到低，同分按「优先级列表」的顺序。\n分数会存到文件，重启不丢。\n\n关掉的话就严格按「优先级列表」的固定顺序，不学习。",
+        "obvious_hint": true
+      },
+      "timeout_penalty": {
+        "description": "超时扣分",
+        "type": "int",
+        "default": 25,
+        "hint": "一次超时扣多少分（1~100，默认 25）。\n\n扣得越狠，超时的模型沉得越快。\n如果上游本来就慢（比如视觉模型要 10-20 秒），可以调小到 10-15，\n避免正常慢但能用的模型被误判。",
+        "obvious_hint": true
+      },
+      "fail_penalty": {
+        "description": "失败扣分",
+        "type": "int",
+        "default": 12,
+        "hint": "一次普通失败（非超时）扣多少分（1~100，默认 12）。\n\n比如返回空内容、HTTP 5xx、解析失败这类。\n比超时扣得轻，因为不一定是模型的问题。",
+        "obvious_hint": true
+      },
+      "recover_step": {
+        "description": "成功加分",
+        "type": "int",
+        "default": 5,
+        "hint": "成功一次加多少分（1~100，默认 5）。\n\n故意加得慢：一次偶然成功不该立刻把分数冲回去，\n要连续稳定几次才能爬回高位。",
+        "obvious_hint": true
+      },
+      "initial_score": {
+        "description": "初始分数",
+        "type": "int",
+        "default": 70,
+        "hint": "新目标（或重置后）的起始分（0~100，默认 70）。\n\n所有目标同分时，就按「优先级列表」的顺序决胜负 ——\n所以填了优先级列表的话，初始顺序仍然是你说了算。",
         "obvious_hint": true
       }
     }

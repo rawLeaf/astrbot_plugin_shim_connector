@@ -16,7 +16,9 @@
  */
 
 import { createServer } from "node:http";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 
 const PORT = Number(process.env.LLM_POOL_PORT ?? 8792);
 const TOKEN = process.env.LLM_POOL_TOKEN ?? "sk-llm-pool-local";
@@ -66,7 +68,68 @@ const TARGET_IDS =
     ? TARGETS_ENV.split(",").map((s) => s.trim()).filter(Boolean)
     : DEFAULT_TARGET_IDS;
 
+// ── 自动调节（health score）─────────────────────────────────
+//
+// 每个目标维护一个健康分（0~100），每次调用后调整：
+//   - 成功：+RECOVER_STEP（慢慢爬回来，避免一次偶然就冲顶）
+//   - 超时：-TIMEOUT_PENALTY（超时最伤，用户等不起）
+//   - 其他失败：-FAIL_PENALTY
+//
+// priority 模式下按「健康分降序 + 原始优先级」排：
+//   分数高的先试；同分则按你配置的顺序。
+// 这样长期超时的目标会自然沉到底部，好的往上浮。
+//
+// 分数持久化到文件，重启后接着用（不会因为重启就忘掉谁不行）。
+
+/** 健康分上限 / 下限。 */
+const SCORE_MAX = 100;
+const SCORE_MIN = 0;
+/** 成功一次加多少。 */
+const RECOVER_STEP = Number(process.env.LLM_POOL_RECOVER_STEP ?? 5) || 5;
+/** 超时一次扣多少（比普通失败更狠）。 */
+const TIMEOUT_PENALTY = Number(process.env.LLM_POOL_TIMEOUT_PENALTY ?? 25) || 25;
+/** 普通失败一次扣多少。 */
+const FAIL_PENALTY = Number(process.env.LLM_POOL_FAIL_PENALTY ?? 12) || 12;
+/** 启动时的初始分。 */
+const INITIAL_SCORE = Number(process.env.LLM_POOL_INITIAL_SCORE ?? 70) || 70;
+/** 是否启用自动调节。 */
+const AUTO_TUNE = (process.env.LLM_POOL_AUTO_TUNE ?? "1") !== "0";
+
+/** 健康分持久化文件（与 shim 同目录）。 */
+const HEALTH_FILE = process.env.LLM_POOL_HEALTH_FILE ||
+  join(fileURLToPath(new URL(".", import.meta.url)), ".llm-pool-health.json");
+
+/** 读上次的健康分。 */
+function loadHealth() {
+  try {
+    const doc = JSON.parse(readFileSync(HEALTH_FILE, "utf8"));
+    if (doc && typeof doc === "object" && doc.scores && typeof doc.scores === "object") {
+      return doc.scores;
+    }
+  } catch { /* 没有就从头开始 */ }
+  return {};
+}
+
+/** 写健康分（同步、小文件、不阻塞多久）。 */
+function saveHealth(scores) {
+  try {
+    writeFileSync(
+      HEALTH_FILE,
+      JSON.stringify({ updatedAt: new Date().toISOString(), scores }, null, 2),
+      "utf8",
+    );
+  } catch (e) {
+    console.error("[llm-pool] 写健康分失败: " + String(e));
+  }
+}
+
+/** 夹紧到 [SCORE_MIN, SCORE_MAX]。 */
+function clampScore(n) {
+  return Math.max(SCORE_MIN, Math.min(SCORE_MAX, n));
+}
+
 function loadTargets() {
+  const savedHealth = loadHealth();
   const raw = readFileSync(CONFIG_FILE, "utf8").replace(/^\uFEFF/, "");
   const doc = JSON.parse(raw);
   const providers = doc.provider ?? [];
@@ -74,7 +137,7 @@ function loadTargets() {
   const bySource = new Map(sources.map((s) => [s.id, s]));
 
   const out = [];
-  for (const id of TARGET_IDS) {
+  for (const [idx, id] of TARGET_IDS.entries()) {
     const p = providers.find((x) => x.id === id);
     if (!p) {
       console.error("[llm-pool] 跳过（provider 不存在）: " + id);
@@ -94,6 +157,14 @@ function loadTargets() {
       cooldownUntil: 0,
       okCount: 0,
       failCount: 0,
+      /** 原始优先级（配置里的顺序）。 */
+      baseRank: idx,
+      /** 健康分，从持久化文件恢复。 */
+      score: clampScore(
+        typeof savedHealth[id] === "number" ? savedHealth[id] : INITIAL_SCORE,
+      ),
+      /** 连续超时次数。 */
+      timeoutStreak: 0,
     });
   }
   return out;
@@ -216,21 +287,17 @@ async function handleChat(req, res) {
   // 按策略生成尝试顺序
   let order;
   if (STRATEGY === "roundrobin") {
-    // 依次轮换，均摊负载
     order = [];
     for (let i = 0; i < n; i += 1) order.push(targets[(cursor + i) % n]);
+  } else if (AUTO_TUNE) {
+    // priority + 自动调节：按健康分降序，同分按原始优先级
+    order = targets.slice().sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return a.baseRank - b.baseRank;
+    });
   } else {
-    // priority：严格按列表顺序。列表顺序 = 用户配置的优先级。
-    // 前面的可用就一直用它；冷却/连续失败才退到下一个。
-    //
-    // 连续失败达阈值的排到最后，避免每次都先撞墙再降级。
-    const healthy = [];
-    const degraded = [];
-    for (const t of targets) {
-      if (t.failCount >= FAIL_THRESHOLD) degraded.push(t);
-      else healthy.push(t);
-    }
-    order = healthy.concat(degraded);
+    // priority + 关闭自动调节：只看原始配置顺序
+    order = targets.slice().sort((a, b) => a.baseRank - b.baseRank);
   }
 
   const failures = [];
@@ -251,7 +318,12 @@ async function handleChat(req, res) {
     if (r.ok) {
       t.okCount += 1;
       t.failCount = 0;
+      t.timeoutStreak = 0;
       t.cooldownUntil = 0;
+      if (AUTO_TUNE) {
+        t.score = clampScore(t.score + RECOVER_STEP);
+        saveHealth(Object.fromEntries(targets.map((x) => [x.id, x.score])));
+      }
       if (STRATEGY === "roundrobin") {
         cursor = (targets.indexOf(t) + 1) % n;
       }
@@ -289,9 +361,30 @@ async function handleChat(req, res) {
     }
 
     t.failCount += 1;
+
+    // 是否算"超时"：AbortError / timeout / 状态码 0
+    const detail = String(r.detail || "");
+    const isTimeout =
+      r.status === 0 ||
+      /AbortError|aborted|timeout|TimedOut|ETIMEDOUT/i.test(detail);
+
+    if (isTimeout) t.timeoutStreak += 1;
+    else t.timeoutStreak = 0;
+
     t.cooldownUntil = Date.now() + (r.rateLimited ? COOLDOWN_RATE_LIMIT : COOLDOWN_OTHER);
-    failures.push(t.id + " HTTP" + r.status + " " + String(r.detail).slice(0, 100));
-    console.error("[llm-pool] " + t.id + " FAIL " + ms + "ms: " + String(r.detail).slice(0, 150));
+
+    if (AUTO_TUNE) {
+      const penalty = isTimeout ? TIMEOUT_PENALTY : FAIL_PENALTY;
+      t.score = clampScore(t.score - penalty);
+      saveHealth(Object.fromEntries(targets.map((x) => [x.id, x.score])));
+      console.error(
+        "[llm-pool] " + t.id + " 健康分 -" + penalty +
+        (isTimeout ? "（超时）" : "") + " → " + t.score,
+      );
+    }
+
+    failures.push(t.id + " HTTP" + r.status + " " + detail.slice(0, 100));
+    console.error("[llm-pool] " + t.id + " FAIL " + ms + "ms: " + detail.slice(0, 150));
   }
 
   sendError(res, 503, "all llm targets failed: " + failures.join(" | "), "all_failed");
@@ -306,17 +399,44 @@ const server = createServer((req, res) => {
       port: PORT,
       strategy: STRATEGY,
       fail_threshold: FAIL_THRESHOLD,
-      targets: targets.map((t, i) => ({
+      auto_tune: AUTO_TUNE,
+      health_file: HEALTH_FILE,
+      targets: (AUTO_TUNE && STRATEGY !== "roundrobin"
+        ? targets.slice().sort((a, b) => (b.score - a.score) || (a.baseRank - b.baseRank))
+        : targets
+      ).map((t, i) => ({
         rank: i + 1,
+        base_rank: t.baseRank + 1,
         id: t.id,
+        score: t.score,
         cooling: t.cooldownUntil > Date.now(),
         degraded: t.failCount >= FAIL_THRESHOLD,
+        timeout_streak: t.timeoutStreak,
         ok: t.okCount,
         fail: t.failCount,
       })),
     });
     return;
   }
+  // 重置健康分（所有目标回到初始值）
+  if (req.method === "POST" && (url === "/reset-health" || url === "/reset-health/")) {
+    for (const t of targets) {
+      t.score = INITIAL_SCORE;
+      t.failCount = 0;
+      t.timeoutStreak = 0;
+      t.cooldownUntil = 0;
+    }
+    saveHealth(Object.fromEntries(targets.map((t) => [t.id, t.score])));
+    console.error("[llm-pool] 健康分已重置为 " + INITIAL_SCORE);
+    sendJson(res, 200, {
+      ok: true,
+      message: "健康分已重置",
+      score: INITIAL_SCORE,
+      targets: targets.map((t) => ({ id: t.id, score: t.score })),
+    });
+    return;
+  }
+
   if (!bearerOk(req)) {
     sendError(res, 401, "missing or invalid Authorization bearer", "unauthorized");
     return;

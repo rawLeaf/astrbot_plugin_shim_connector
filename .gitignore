@@ -8,3 +8,5 @@ trae-auth.json
 auth.v1.dat
 .env
 shims/.wb-models.json
+shims/.vision-health.json
+shims/.llm-pool-health.json

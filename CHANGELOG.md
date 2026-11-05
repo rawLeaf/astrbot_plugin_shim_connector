@@ -7,6 +7,112 @@
 
 ---
 
+## [1.5.0] — 2026-11-05
+
+### 新增：自动调节（health score）
+
+**问题**：原来的 `priority` 是静态的。你在配置里排第一的模型如果长期超时，
+每次请求还是要先撞它一遍，白等十几秒才降级到能用的。
+
+**现在**：每个目标维护一个健康分（0~100），按分数动态排序。
+
+### 打分规则
+
+| 事件 | 分数变化 | 说明 |
+|---|---|---|
+| 成功 | **+5** | 加得慢，避免一次偶然就冲回高位 |
+| **超时** | **−25** | 扣得最狠，因为用户等不起 |
+| 其他失败 | −12 | 空内容 / 5xx / 解析失败等 |
+
+初始分 70。四个数值都能在配置里调。
+
+### 排序规则
+
+```
+按健康分从高到低
+  同分 → 按「优先级列表」的顺序
+```
+
+**效果**：
+
+- 你排第 1 的模型如果一直超时，分数会掉下去，自动沉到最后
+- 原本排第 2、3 的往上浮，成为首选
+- 下沉的模型只要成功一次，就开始慢慢爬回来（+5/次）
+
+### 持久化
+
+分数写到 shim 同目录的 `.vision-health.json` / `.llm-pool-health.json`：
+
+```json
+{
+  "updatedAt": "2026-11-05T05:43:02.402Z",
+  "scores": {
+    "workbuddy_shim/minimax-m3.1-flash": 40,
+    "zhipu_vision": 70
+  }
+}
+```
+
+**重启不丢** —— 否则每次重启都回到初始状态，学不到东西。
+
+### 新增配置（`vision` / `llm_pool` 两组都有）
+
+| 配置 | 类型 | 默认 | 说明 |
+|---|---|---|---|
+| `auto_tune` | bool | `true` | 自动调节开关 |
+| `timeout_penalty` | int | 25 | 超时扣分（1~100） |
+| `fail_penalty` | int | 12 | 普通失败扣分（1~100） |
+| `recover_step` | int | 5 | 成功加分（1~100） |
+| `initial_score` | int | 70 | 初始分（0~100） |
+
+### 新增 API
+
+| 接口 | 方法 | 作用 |
+|---|---|---|
+| `.../health?name=vision` | GET | 查健康分与当前排序 |
+| `.../reset-health` | POST | 重置所有目标回初始分 |
+
+`health` 返回里每个目标带：
+
+```json
+{
+  "rank": 1,           // 当前实际尝试顺序
+  "base_rank": 3,      // 你在配置里排的位置
+  "id": "...",
+  "score": 85,
+  "timeout_streak": 0, // 连续超时次数
+  "ok": 12, "fail": 1
+}
+```
+
+**`rank` 和 `base_rank` 不同，就说明自动调节在起作用。**
+
+### shim 侧实现
+
+`vision-shim.mjs` / `llm-pool-shim.mjs` 同步改造：
+
+- 新增 `SCORE_MAX/MIN`、`RECOVER_STEP`、`TIMEOUT_PENALTY`、`FAIL_PENALTY`、`INITIAL_SCORE`、`AUTO_TUNE`
+- `loadHealth()` / `saveHealth()` / `clampScore()`
+- 每个 target 增加 `baseRank`（原始位置）、`score`、`timeoutStreak`
+- 超时判定：`status === 0` 或 detail 匹配 `AbortError|aborted|timeout|TimedOut|ETIMEDOUT`
+- 排序改为 `sort((a,b) => (b.score - a.score) || (a.baseRank - b.baseRank))`
+- 新增 `POST /reset-health`
+
+### 验证
+
+| 检查 | 结果 |
+|---|---|
+| 默认值（auto_tune=true，参数 25/12/5/70） | ✅ |
+| 自定义值生效 | ✅ |
+| 边界夹紧（999→100、0→1、abc→5、-5→0） | ✅ |
+| 超时扣 30 分（70→40） | ✅ |
+| 分数持久化到文件 | ✅ |
+| 按分数重排（低分沉底、高分浮顶） | ✅ |
+| 实际请求跳过死端口命中可用目标 | ✅ |
+| `/reset-health` 恢复初始分 | ✅ |
+
+---
+
 ## [1.4.8] — 2026-11-05
 
 ### 文档：清除本机日志数据
@@ -873,6 +979,7 @@ Trae 实测真实对话返回正常（`DeepSeek-V4-Flash-Official`）。
 
 | 版本 | commit | 要点 |
 |---|---|---|
+| 1.5.0 | 待定 | 自动调节：长期超时的模型自动沉底，分数持久化 |
 | 1.4.8 | 待定 | 清除文档里的本机日志数据 |
 | 1.4.7 | 待定 | README 风险提示提到最醒目位置（ToS/封号） |
 | 1.4.6 | 待定 | 删除 _pid_listening_on/_kill_pid 同步死代码 |
