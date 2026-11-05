@@ -197,6 +197,27 @@ async function tryOne(t, bodyObj, signal) {
   return { ok: true, payload };
 }
 
+const MAX_IMAGE_BASE64_BYTES = Number(process.env.VISION_MAX_IMAGE_B64 ?? 4_000_000);
+
+/** 检查 messages 里的 data:base64 图片，超限时返回原因字符串。 */
+function shrinkOversizedImages(bodyObj, limit) {
+  const msgs = Array.isArray(bodyObj.messages) ? bodyObj.messages : [];
+  for (const m of msgs) {
+    if (!Array.isArray(m?.content)) continue;
+    for (const part of m.content) {
+      const url = part?.image_url?.url;
+      if (typeof url !== "string" || !url.startsWith("data:")) continue;
+      if (url.length > limit) {
+        return (
+          "image base64 " + url.length + "B exceeds limit " + limit + "B," +
+          " please compress (set VISION_MAX_IMAGE_B64 to override)"
+        );
+      }
+    }
+  }
+  return "";
+}
+
 async function handleChat(req, res) {
   const raw = (await readBody(req)).toString("utf8");
   let input;
@@ -210,6 +231,15 @@ async function handleChat(req, res) {
   // 客户端传来的 model 忽略，统一按轮换走；但保留其他字段（messages/图片/tools 等）
   const bodyObj = { ...input, model: VIRTUAL_MODEL, stream: false };
   delete bodyObj.stream;
+
+  // 上游对附件有体积上限（超了报 code 11154），超限就直接判失败并换下一个候选，
+  // 避免白等十几秒超时、也避免把好候选的 failCount 拖高。
+  const oversized = shrinkOversizedImages(bodyObj, MAX_IMAGE_BASE64_BYTES);
+  if (oversized) {
+    console.error("[vision-shim] request dropped: " + oversized);
+    sendError(res, 413, oversized, "image_too_large");
+    return;
+  }
 
   const controller = new AbortController();
   res.on("close", () => controller.abort());
