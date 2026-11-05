@@ -57,41 +57,55 @@ const KEY_FETCH_TIMEOUT_MS = 10000;
 const APP_EXECUTABLE_MISS_TTL_MS = 60000;
 
 /**
- * 模型目录 —— WorkBuddy 上游接受的模型 id。
+ * 模型目录 —— 来自官方 /v3/config 名册，按「免费优先 + 速度」排序。
  *
- * 这些是实测可用的（2026-10-28）。上游不提供模型列表接口，
- * 所以这里静态列出；调用 /v1/models 时返回它们，
- * 好让下游（如 AstrBot 插件）能自动注册 provider。
- */
-/**
- * 模型目录 —— 按「速度优先、成本其次」排序（2026-11-05 实测）。
+ * 数据来源：2026-11-05 实测（固定 prompt「1+1=?」，max_tokens 1500）。
+ * credit 是该次调用实际扣费（上游 usage.credit）。
  *
- * 测法：固定 prompt「1+1=?」，max_tokens 1000，各跑 3 次取中位数。
- * credit 是该次调用的实际扣费（上游 usage.credit 字段）。
+ * | 模型                  | 延迟   | credit | 备注 |
+ * |-----------------------|--------|--------|------|
+ * | glm-5.2               | 1499ms | 0      | 免费，最快 |
+ * | space-bunny           | 1532ms | 0      | 免费，多模态 |
+ * | hy3-b                 | 1596ms | 0      | 免费，混元 |
+ * | hy3-c                 | 1617ms | 0      | 免费，混元 |
+ * | hy3-x                 | 1904ms | 0      | 免费，混元 |
+ * | deepseek-v4.1-flash   | 2088ms | 0      | 免费 |
+ * | hy3                   | 2133ms | 0      | 免费，混元 |
+ * | deepseek-v4-flash     | 2161ms | 0      | 免费 |
+ * | minimax-m3.1-flash    | 2173ms | 0.01   | 极便宜 |
+ * | deepseek-v4-pro       | 2281ms | 0      | 免费 |
+ * | auto                  | 2330ms | 0      | 免费，自动选择 |
+ * | step-5-preview        | 2718ms | 0.02   | |
+ * | glm-5.3-flash         | 2898ms | 0      | 免费 |
+ * | glm-5.3               | 3107ms | 0.01   | |
+ * | hy4std                | 3499ms | 0.06   | 混元标准版，付费 |
+ * | hy4free               | 5521ms | 0      | 混元免费版，推理强但慢 |
+ * | mimo-v2.6-pro         | 7078ms | 0      | 免费但很慢 |
  *
- * | 模型                | 延迟   | credit | 说明 |
- * |---------------------|--------|--------|------|
- * | kimi-k2.6           | 1416ms | 0      | 最快，免费 |
- * | deepseek-v4.1-flash | 2004ms | 0      | 免费 |
- * | glm-5.3-flash       | 2081ms | 0.01   | 极便宜 |
- * | space-bunny         | 2212ms | 0      | 多模态，免费 |
- * | hy3                 | 2244ms | 0      | 混元，免费，带推理 |
- * | minimax-m3.1-flash  | 2426ms | 0      | 免费 |
- * | hy4                 | 3718ms | 0.02   | 混元推理，**按量计费** |
- * | deepseek-v4-pro     | 4496ms | 0.01   | 深度推理，慢 |
+ * 不可用（502，权限不足）：deepseek-v4-flash-ioa / deepseek-v4-pro-ioa /
+ * kimi-k2.8-preview / kimi-k3-1 / kimi-k3.1-pro
  *
- * 注意 hy4 是唯一明显要钱的：大输出时 credit 会涨（实测 1463 token → 0.42）。
- * hy3 测了 3000 token 输出仍是 0，确认免费。
+ * 注意：credit 会有波动，同一模型不同次调用可能 0~0.03，
+ * 以 /cost 接口的实际累计为准。
  */
 const MODEL_CATALOG = [
-  { id: "kimi-k2.6",                   note: "最快（1.4s），免费" },
-  { id: "deepseek-v4.1-flash",         note: "快（2.0s），免费" },
-  { id: "glm-5.3-flash",               note: "快（2.1s），极便宜（0.01）" },
-  { id: "space-bunny",                 note: "多模态（2.2s），免费" },
-  { id: "hy3",                         note: "腾讯混元（2.2s），免费，带 reasoning_content" },
-  { id: "minimax-m3.1-flash",          note: "（2.4s），免费" },
-  { id: "hy4",                         note: "混元推理（3.7s），支持图片；**按量计费**（约 0.02/次）" },
-  { id: "deepseek-v4-pro",             note: "深度推理（4.5s），便宜但慢" },
+  { id: "glm-5.2",                  note: "免费 · 最快 1.5s" },
+  { id: "space-bunny",              note: "免费 · 多模态 1.5s" },
+  { id: "hy3-b",                    note: "免费 · 混元 1.6s" },
+  { id: "hy3-c",                    note: "免费 · 混元 1.6s" },
+  { id: "hy3-x",                    note: "免费 · 混元 1.9s" },
+  { id: "deepseek-v4.1-flash",      note: "免费 2.1s" },
+  { id: "hy3",                      note: "免费 · 混元 2.1s" },
+  { id: "deepseek-v4-flash",        note: "免费 2.2s" },
+  { id: "minimax-m3.1-flash",       note: "0.01 · 2.2s" },
+  { id: "deepseek-v4-pro",          note: "免费 2.3s" },
+  { id: "auto",                     note: "免费 · 自动选择 2.3s" },
+  { id: "step-5-preview",           note: "0.02 · 2.7s" },
+  { id: "glm-5.3-flash",            note: "免费 2.9s" },
+  { id: "glm-5.3",                  note: "0.01 · 3.1s" },
+  { id: "hy4std",                   note: "0.06 · 混元标准版 3.5s" },
+  { id: "hy4free",                  note: "免费 · 混元推理，强但慢 5.5s" },
+  { id: "mimo-v2.6-pro",            note: "免费但很慢 7.1s" },
 ];
 
 /**
@@ -124,6 +138,132 @@ const PROBE_CANDIDATES = [
   "gpt-5", "gpt-4.1", "claude-sonnet-4.5", "gemini-2.5-pro",
 ];
 
+
+// ── 耗费统计（credit）───────────────────────────────────────
+//
+// WorkBuddy 上游在 usage.credit 里返回本次调用扣的积分。
+// 免费模型恒为 0，付费模型按 token 量浮动。
+//
+// 这里累计到内存 + 定期落盘，供 /cost 查询。
+
+const COST_FILE = process.env.WB_COST_FILE ||
+  join(fileURLToPath(new URL(".", import.meta.url)), ".wb-cost.json");
+
+/** 每个模型的累计耗费。 */
+let costStats = (() => {
+  try {
+    const doc = JSON.parse(readFileSync(COST_FILE, "utf8"));
+    if (doc && typeof doc === "object" && doc.byModel) {
+      return { byModel: doc.byModel, since: doc.since || new Date().toISOString() };
+    }
+  } catch { /* 首次运行 */ }
+  return { byModel: {}, since: new Date().toISOString() };
+})();
+
+let costDirty = false;
+
+/** 记录一次调用的耗费。 */
+function recordCost(model, credit, usage) {
+  if (!model) return;
+  const cur = costStats.byModel[model] || {
+    calls: 0, credit: 0, promptTokens: 0, completionTokens: 0, fails: 0,
+  };
+  cur.calls += 1;
+  cur.credit = Number((cur.credit + (Number(credit) || 0)).toFixed(4));
+  if (usage) {
+    cur.promptTokens += Number(usage.prompt_tokens || 0);
+    cur.completionTokens += Number(usage.completion_tokens || 0);
+  }
+  costStats.byModel[model] = cur;
+  costDirty = true;
+}
+
+/** 记录一次失败（无 credit）。 */
+function recordFail(model) {
+  if (!model) return;
+  const cur = costStats.byModel[model] || {
+    calls: 0, credit: 0, promptTokens: 0, completionTokens: 0, fails: 0,
+  };
+  cur.fails += 1;
+  costStats.byModel[model] = cur;
+  costDirty = true;
+}
+
+/** 落盘（只在有变化时写）。 */
+function flushCost() {
+  if (!costDirty) return;
+  try {
+    writeFileSync(
+      COST_FILE,
+      JSON.stringify({ ...costStats, updatedAt: new Date().toISOString() }, null, 2),
+      "utf8",
+    );
+    costDirty = false;
+  } catch (e) {
+    console.error("[workbuddy-shim] 写耗费统计失败: " + String(e));
+  }
+}
+
+// 每 30 秒落盘一次，避免每次调用都写文件
+setInterval(flushCost, 30000).unref?.();
+
+// ── 上游模型名册（/v3/config）────────────────────────────────
+//
+// 这是官方接口，返回完整模型清单 + 计费规则 + 促销活动。
+// 需要正确的 User-Agent（缺了报 code 12403 "check ua"）。
+
+/** 缓存的名册。 */
+let rosterCache = null;
+let rosterCachedAt = 0;
+const ROSTER_TTL_MS = 10 * 60 * 1000;  // 10 分钟
+
+/**
+ * 拉取上游模型名册。
+ *
+ * @param {object} cred 凭据
+ * @param {boolean} force 忽略缓存
+ * @returns {Promise<object>} 名册数据
+ */
+async function fetchRoster(cred, force = false) {
+  if (!force && rosterCache && Date.now() - rosterCachedAt < ROSTER_TTL_MS) {
+    return rosterCache;
+  }
+  const r = await fetch(CHAT_BASE + "/v3/config", {
+    headers: buildHeaders(cred),
+    signal: AbortSignal.timeout(20000),
+  });
+  if (!r.ok) {
+    const t = (await r.text()).slice(0, 300);
+    throw new Error("拉取名册失败 HTTP" + r.status + ": " + t);
+  }
+  const doc = await r.json();
+  if (!doc || doc.code !== 0 || !doc.data) {
+    throw new Error("名册格式异常: " + JSON.stringify(doc).slice(0, 200));
+  }
+
+  // 提取模型清单（递归找 models / model / modelIds 字段）
+  const models = new Set();
+  (function walk(o) {
+    if (!o || typeof o !== "object") return;
+    if (Array.isArray(o)) { o.forEach(walk); return; }
+    for (const [k, v] of Object.entries(o)) {
+      if (k === "models" && Array.isArray(v)) v.forEach((m) => typeof m === "string" && models.add(m));
+      if (k === "model" && typeof v === "string") models.add(v);
+      if (k === "modelIds" && Array.isArray(v)) v.forEach((m) => typeof m === "string" && models.add(m));
+      walk(v);
+    }
+  })(doc.data);
+
+  rosterCache = {
+    models: [...models].sort(),
+    promotions: doc.data.modelPromotions || [],
+    config: doc.data.config || {},
+    fetchedAt: new Date().toISOString(),
+  };
+  rosterCachedAt = Date.now();
+  console.error("[workbuddy-shim] 名册已刷新，" + rosterCache.models.length + " 个模型");
+  return rosterCache;
+}
 
 // ── 模型探测（「刷新模型」）──────────────────────────────────
 
@@ -647,6 +787,9 @@ function buildHeaders(cred) {
     "X-Conversation-ID": randomUUID(),
     "X-Conversation-Request-ID": randomUUID(),
     "X-Conversation-Message-ID": randomUUID(),
+    // /v3/config 会校验 UA（缺了报 code 12403 "check ua"）
+    "User-Agent": process.env.WB_UA ||
+      "WorkBuddy/1.0.0 (Windows NT 10.0; Win64; x64) CodeBuddy-CLI/1.0.0",
   };
 }
 
@@ -830,6 +973,8 @@ async function handleChat(req, res) {
 
   if (!upstream.ok) {
     const t = (await upstream.text()).slice(0, 800);
+    recordFail(model);
+    flushCost();
     sendError(res, upstream.status === 401 ? 401 : 502, t || ("upstream " + upstream.status), "upstream");
     return;
   }
@@ -853,7 +998,15 @@ async function handleChat(req, res) {
   }
 
   const text = await upstream.text();
-  sendJson(res, 200, aggregateSse(text, model));
+  const out = aggregateSse(text, model);
+  // 记录耗费（免费模型 credit 恒为 0）
+  if (out && out.usage) {
+    recordCost(model, out.usage.credit, out.usage);
+    flushCost();  // 立即落盘，避免进程被杀丢数据
+  } else {
+    recordCost(model, 0, null);
+  }
+  sendJson(res, 200, out);
 }
 
 const server = createServer((req, res) => {
@@ -864,21 +1017,126 @@ const server = createServer((req, res) => {
     return;
   }
 
+  // 调试端点：用真实凭据查上游 model 名册（WB_DEBUG=1 时启用）
+  if (process.env.WB_DEBUG === "1" && req.method === "GET" &&
+      (url === "/debug-v3-config" || url === "/debug-v3-config/")) {
+    (async () => {
+      const cred = await resolveCredential().catch((e) => {
+        sendError(res, 500, "凭据加载失败: " + String(e), "no_cred");
+        return null;
+      });
+      if (!cred) return;
+      const paths = ["/v3/config", "/v2/config", "/v1/config"];
+      const uas = [
+        process.env.WB_UA || "WorkBuddy/1.0.0 (Windows NT 10.0; Win64; x64) CodeBuddy-CLI/1.0.0",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) WorkBuddy/5.6.0 Chrome/120.0.0.0 Electron/28.0.0 Safari/537.36",
+        "CodeBuddy-CLI/1.0.0",
+        "workbuddy/5.6.0",
+      ];
+      const out = [];
+      for (const p of paths) {
+        for (const ua of uas) {
+          try {
+            const h = { ...buildHeaders(cred), "User-Agent": ua };
+            const r = await fetch(CHAT_BASE + p, {
+              headers: h,
+              signal: AbortSignal.timeout(15000),
+            });
+            const t = await r.text();
+            out.push({ path: p, ua: ua.slice(0, 40), status: r.status, len: t.length, body: t.slice(0, 200000) });
+            if (r.status === 200 && t.length > 100) break;  // 成功就不试别的 UA
+          } catch (e) {
+            out.push({ path: p, ua: ua.slice(0, 40), status: 0, error: String(e).slice(0, 100) });
+          }
+        }
+      }
+      sendJson(res, 200, { ok: true, base: CHAT_BASE, results: out });
+    })().catch((e) => {
+      if (!res.headersSent) sendError(res, 500, String(e), "internal");
+    });
+    return;
+  }
+
   if (!bearerOk(req)) {
     sendError(res, 401, "missing or invalid Authorization bearer", "unauthorized");
     return;
   }
 
+  // 官方模型名册（/v3/config）—— 完整清单 + 计费规则 + 促销
+  if (req.method === "GET" && (url === "/v3/models" || url === "/v3/models/")) {
+    (async () => {
+      const cred = await resolveCredential().catch(() => null);
+      if (!cred) {
+        sendError(res, 500, "无法加载凭据", "no_cred");
+        return;
+      }
+      const force = url.includes("force=1") || (req.url || "").includes("force=1");
+      try {
+        const roster = await fetchRoster(cred, force);
+        sendJson(res, 200, { ok: true, ...roster });
+      } catch (e) {
+        sendError(res, 502, String(e && e.message ? e.message : e), "roster_failed");
+      }
+    })().catch((e) => {
+      if (!res.headersSent) sendError(res, 500, String(e), "internal");
+    });
+    return;
+  }
+
+  // 耗费统计
+  if (req.method === "GET" && (url === "/cost" || url.startsWith("/cost?"))) {
+    const byModel = costStats.byModel || {};
+    const totalCredit = Object.values(byModel).reduce((s, x) => s + (Number(x.credit) || 0), 0);
+    const totalCalls = Object.values(byModel).reduce((s, x) => s + (Number(x.calls) || 0), 0);
+    const totalFails = Object.values(byModel).reduce((s, x) => s + (Number(x.fails) || 0), 0);
+    // 按耗费降序
+    const rows = Object.entries(byModel)
+      .map(([id, x]) => ({
+        model: id,
+        calls: x.calls || 0,
+        fails: x.fails || 0,
+        credit: Number((x.credit || 0).toFixed(4)),
+        free: (x.credit || 0) === 0,
+        promptTokens: x.promptTokens || 0,
+        completionTokens: x.completionTokens || 0,
+      }))
+      .sort((a, b) => b.credit - a.credit || b.calls - a.calls);
+    sendJson(res, 200, {
+      ok: true,
+      since: costStats.since,
+      totalCredit: Number(totalCredit.toFixed(4)),
+      totalCalls,
+      totalFails,
+      byModel: rows,
+    });
+    return;
+  }
+
+  // 重置耗费统计
+  if (req.method === "POST" && (url === "/cost/reset" || url === "/cost/reset/")) {
+    costStats = { byModel: {}, since: new Date().toISOString() };
+    costDirty = true;
+    flushCost();
+    console.error("[workbuddy-shim] 耗费统计已重置");
+    sendJson(res, 200, { ok: true, message: "耗费统计已重置", since: costStats.since });
+    return;
+  }
+
   if (req.method === "GET" && (url === "/v1/models" || url === "/v1/models/")) {
     const noteOf = new Map(MODEL_CATALOG.map((m) => [m.id, m.note]));
+    // 优先用名册（官方接口），拿不到再退回探测结果
+    const list = rosterCache && rosterCache.models.length > 0
+      ? rosterCache.models
+      : ACTIVE_MODELS;
     sendJson(res, 200, {
       object: "list",
-      data: ACTIVE_MODELS.map((id) => ({
+      source: rosterCache ? "v3/config" : "probe",
+      data: list.map((id) => ({
         id,
         object: "model",
         created: 0,
         owned_by: "workbuddy",
-        note: noteOf.get(id) || "探测发现",
+        note: noteOf.get(id) || "",
       })),
     });
     return;

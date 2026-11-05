@@ -10,3 +10,4 @@ auth.v1.dat
 shims/.wb-models.json
 shims/.vision-health.json
 shims/.llm-pool-health.json
+shims/.wb-cost.json

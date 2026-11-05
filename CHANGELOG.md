@@ -7,6 +7,95 @@
 
 ---
 
+## [1.5.2] — 2026-11-05
+
+### 新增：官方模型名册 + 耗费统计
+
+之前找模型只能靠「撞名字」（`/refresh-models` 探测 40 个候选）。
+实际上游有官方接口，只是**需要正确的 User-Agent** —— 缺了会报
+`code 12403 "check ua, get coding copilot version error"`。
+
+补上 UA 后 `/v3/config` 返回完整名册，本次接进 shim。
+
+### 新接口（shim 侧）
+
+| 接口 | 方法 | 作用 |
+|---|---|---|
+| `/v3/models` | GET | 官方模型名册（23 个模型 + 6 个促销活动） |
+| `/cost` | GET | 耗费统计（按模型累计 credit） |
+| `/cost/reset` | POST | 重置耗费统计 |
+
+`/v1/models` 现在优先用名册（响应里 `source: "v3/config"`），
+拿不到才退回探测结果（`source: "probe"`）。
+
+### 新接口（插件侧）
+
+```
+GET  .../models?name=workbuddy&force=1     查名册
+GET  .../cost?name=workbuddy               查耗费
+POST .../cost-reset  {"name":"workbuddy"}  重置耗费
+```
+
+### 关键发现：hy4 分两个版本
+
+| 模型 | 延迟 | 1000 token 输出 | credit |
+|---|---|---|---|
+| **`hy4free`** | 5521ms | 1000 | **0**（免费） |
+| **`hy4std`** | 3499ms | 1000 | **0.29**（付费） |
+
+之前测试的 `hy4` 其实就是 `hy4std`，所以一直以为 hy4 要钱。
+
+### 完整名册（23 个）
+
+实测 17 个可用，按「免费优先 + 速度」排序：
+
+| 模型 | 延迟 | credit |
+|---|---|---|
+| glm-5.2 | 1499ms | 0 |
+| space-bunny | 1532ms | 0 |
+| hy3-b | 1596ms | 0 |
+| hy3-c | 1617ms | 0 |
+| hy3-x | 1904ms | 0 |
+| deepseek-v4.1-flash | 2088ms | 0 |
+| hy3 | 2133ms | 0 |
+| deepseek-v4-flash | 2161ms | 0 |
+| minimax-m3.1-flash | 2173ms | 0.01 |
+| deepseek-v4-pro | 2281ms | 0 |
+| auto | 2330ms | 0 |
+| step-5-preview | 2718ms | 0.02 |
+| glm-5.3-flash | 2898ms | 0 |
+| glm-5.3 | 3107ms | 0.01 |
+| hy4std | 3499ms | 0.06 |
+| hy4free | 5521ms | 0 |
+| mimo-v2.6-pro | 7078ms | 0 |
+
+**不可用**（502 权限不足）：`deepseek-v4-flash-ioa`、`deepseek-v4-pro-ioa`、
+`kimi-k2.8-preview`、`kimi-k3-1`、`kimi-k3.1-pro`
+
+### 促销活动（名册里带的）
+
+- 每晚 23:00—次日 8:00 积分限时 5 折（glm-5.2）
+- 7月6日–11月15日 每日赠送免费额度
+
+### 说明：credit 有波动
+
+同一模型不同次调用 credit 不完全一致（glm-5.2 有 0 也有 0.02）。
+可能是缓存命中/未命中差异，或上游动态调价。
+**以 `/cost` 的实际累计为准**，不要看单次。
+
+### 验证
+
+| 检查 | 结果 |
+|---|---|
+| `/v3/models` 拉取 | ✅ 23 个模型 + 6 个促销 |
+| `/v1/models` 标 source=v3/config | ✅ |
+| `/cost` 按模型累计 | ✅ hy4std 0.29 / hy4free 0 / glm-5.2 0.02 |
+| `/cost/reset` | ✅ |
+| **hy4free 输出 1000token 仍 credit=0** | ✅ 确认免费 |
+| **hy4std 同样输出扣 0.29** | ✅ 确认付费 |
+
+---
+
 ## [1.5.1] — 2026-11-05
 
 ### 新增：hy3 / hy4 模型，目录按「速度优先」重排
@@ -1049,6 +1138,7 @@ Trae 实测真实对话返回正常（`DeepSeek-V4-Flash-Official`）。
 
 | 版本 | commit | 要点 |
 |---|---|---|
+| 1.5.2 | 待定 | 官方模型名册 + 耗费统计；发现 hy4free 免费版 |
 | 1.5.1 | 待定 | 新增 hy3/hy4，目录按实测速度重排，标注成本 |
 | 1.5.0 | 待定 | 自动调节：长期超时的模型自动沉底，分数持久化 |
 | 1.4.8 | 待定 | 清除文档里的本机日志数据 |

@@ -1593,6 +1593,9 @@ class ShimConnector(Star):
             ("restart", self._api_restart, ["POST"], "重启指定 shim"),
             ("toggle", self._api_toggle, ["POST"], "切换指定 shim 启停"),
             ("refresh-models", self._api_refresh_models, ["POST"], "探测上游模型"),
+            ("models", self._api_models, ["GET"], "上游官方模型名册"),
+            ("cost", self._api_cost, ["GET"], "耗费统计"),
+            ("cost-reset", self._api_cost_reset, ["POST"], "重置耗费统计"),
             ("health", self._api_health, ["GET"], "轮换层健康分"),
             ("reset-health", self._api_reset_health, ["POST"], "重置健康分"),
         )
@@ -1966,6 +1969,82 @@ class ShimConnector(Star):
             name = str(body.get("name") or "vision").strip()
             data = await self._proxy_shim(name, "/reset-health", "POST")
             logger.info(f"[shim_connector] {name} 健康分已重置")
+            return {"ok": True, "name": name, "shim": data}
+
+        try:
+            return await self._api_response(await handler())
+        except (ValueError, RuntimeError) as exc:
+            return await self._api_response({"ok": False, "message": str(exc)}, 400)
+
+
+    # ── 模型名册与耗费 ────────────────────────────────────────
+
+    async def _api_models(self):
+        """查上游官方模型名册（走 shim 的 /v3/models）。
+
+        查询参数：
+            ?name=workbuddy（默认）
+            ?force=1        强制刷新（忽略 shim 缓存）
+        """
+
+        async def handler():
+            name = "workbuddy"
+            force = False
+            if _quart_request is not None:
+                try:
+                    name = str(_quart_request.args.get("name") or "workbuddy").strip()
+                    force = str(_quart_request.args.get("force") or "") in ("1", "true", "yes")
+                except Exception:  # noqa: BLE001
+                    pass
+            self._require_name(name)
+            if not self._all_defs()[name]["script"].startswith("workbuddy-shim"):
+                raise ValueError(f"{name} 不支持名册查询（只有 workbuddy 系 shim 有）")
+            data = await self._proxy_shim(name, "/v3/models" + ("?force=1" if force else ""))
+            return {"ok": True, "name": name, **data}
+
+        try:
+            return await self._api_response(await handler())
+        except (ValueError, RuntimeError) as exc:
+            return await self._api_response({"ok": False, "message": str(exc)}, 400)
+
+    async def _api_cost(self):
+        """查耗费统计（走 shim 的 /cost）。
+
+        查询参数：?name=workbuddy（默认）
+        """
+
+        async def handler():
+            name = "workbuddy"
+            if _quart_request is not None:
+                try:
+                    name = str(_quart_request.args.get("name") or "workbuddy").strip()
+                except Exception:  # noqa: BLE001
+                    pass
+            self._require_name(name)
+            if not self._all_defs()[name]["script"].startswith("workbuddy-shim"):
+                raise ValueError(f"{name} 不支持耗费统计")
+            data = await self._proxy_shim(name, "/cost")
+            return {"ok": True, "name": name, **data}
+
+        try:
+            return await self._api_response(await handler())
+        except (ValueError, RuntimeError) as exc:
+            return await self._api_response({"ok": False, "message": str(exc)}, 400)
+
+    async def _api_cost_reset(self):
+        """重置耗费统计。
+
+        请求体：{"name": "workbuddy"}
+        """
+
+        async def handler():
+            body = await self._api_body()
+            name = str(body.get("name") or "workbuddy").strip()
+            self._require_name(name)
+            if not self._all_defs()[name]["script"].startswith("workbuddy-shim"):
+                raise ValueError(f"{name} 不支持耗费统计")
+            data = await self._proxy_shim(name, "/cost/reset", "POST")
+            logger.info(f"[shim_connector] {name} 耗费统计已重置")
             return {"ok": True, "name": name, "shim": data}
 
         try:
