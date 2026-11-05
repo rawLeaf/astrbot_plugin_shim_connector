@@ -7,6 +7,139 @@
 
 ---
 
+## [1.5.3] — 2026-11-05
+
+### 修复：8 个路由不处理 query string
+
+**用户报的 bug**：`GET /v3/models?force=1` 返回 404。
+
+根因：路由条件只做全等匹配，带 query 时 `url` 是 `/v3/models?force=1`，
+过不了 `url === "/v3/models"` → 直接 404。
+里面那句 `const force = url.includes("force=1")` 成了死代码。
+
+**同文件 8 个路由都有这个问题**，全部修复：
+
+| 路由 | 修复 |
+|---|---|
+| `/v3/models` | ✅ 加 `startsWith("/v3/models?")` |
+| `/v1/models` | ✅ |
+| `/cost/reset` | ✅ |
+| `/refresh-models` | ✅ |
+| `/v1/chat/completions` | ✅ |
+| `/healthz` | ✅ |
+| `/debug-v3-config` | ✅ |
+| `/cost` | 本来就对（`startsWith("/cost?")`） |
+
+`force` 判定也改成正则，兼容 `?force=1&x=y`：
+
+```javascript
+const force = /[?&]force=(1|true|yes)\b/i.test(url);
+```
+
+### 修复：cost: 0 但实际扣费
+
+`/v3/models` 里 kimi 三个标 `cost=0 / free=true`，但实测每次扣钱：
+
+| 模型 | 实测 | 之前的标注 |
+|---|---|---|
+| kimi-k3-1 | 0.46/次 | ❌ 免费 |
+| kimi-k3.1-pro | 0.365/次 | ❌ 免费 |
+| kimi-k2.8-preview | 0.17/次 | ❌ 免费 |
+
+**根因**：名册返回的 `cost` 字段不代表实际计费。
+只有 `codewise-jump` 是实测确认真免费（4 次调用 credit 精确为 0）。
+
+`MODEL_CATALOG` 现在按**实测**填，并加 `verified` 标记：
+
+```javascript
+{ id: "codewise-jump", cost: 0,    verified: true,  note: "真免费 · 4次调用 credit 精确为 0" }
+{ id: "kimi-k3-1",     cost: 0.46, verified: true,  note: "实测 0.46/次" }
+{ id: "glm-5.2",       cost: 0,    verified: false, note: "名册标 0，未大量实测" }
+```
+
+`verified: true` = 有实测证据，`false` = 按上游推测。
+
+### 新增：/cost 加 costPerCall
+
+```json
+{
+  "model": "kimi-k3-1",
+  "calls": 2,
+  "credit": 0.3,
+  "costPerCall": 0.15,
+  "free": false,
+  "measured": true
+}
+```
+
+`free` 现在按**实测**算：`calls > 0 && credit === 0`。
+没调用过的 `measured: false`、`free: false`（不猜测）。
+
+### 增强：/healthz
+
+原来只有 `{ok, region, port}`，现在：
+
+```json
+{
+  "ok": true,
+  "region": "cn",
+  "port": 8787,
+  "modelsSource": "v3/config",
+  "modelCount": 23,
+  "rosterFetchedAt": "2026-11-05T07:00:46.703Z",
+  "costTotal": 0.4,
+  "costCalls": 16,
+  "verifiedFreeModels": ["codewise-jump", "hy4free", ...]
+}
+```
+
+并加**启动预热**：shim 起来就拉一次名册，`modelsSource` 立刻是 `v3/config`，
+不用等第一次查询。
+
+### 文档：kimi 必须带 system
+
+两个坑叠加，代码注释写清了：
+
+- 坑 A：补 `content:""` 的空 system → 上游当"空内容"报 11151
+- 坑 B：kimi 系列（k3-1 / k3.1-pro / k2.8-preview）**必须**带 system，不带也 11151
+
+排查提示：**看到 11151 先怀疑「system 缺失或为空」**，别看错误码字面意思。
+
+`codewise-jump` 不需要 system，加了也不影响。
+
+### 修复：intl 区 /v1/models 显示 source: probe
+
+原来 `/v1/models` 只判断 `rosterCache` 有没有值，而 `rosterCache` 只在
+调过 `/v3/models` 之后才有 —— 所以 AstrBot 调 `/v1/models` 时永远退回
+`ACTIVE_MODELS`（探测缓存），`source` 显示 `probe`。
+
+**CN 区和 intl 区都一样**，不是 intl 拿不到名册。
+
+实测 intl 区能正常拉 `/v3/config`（21 个模型，含 GPT-6 / Gemini 3.8 / Grok 4.7，
+但这些模型的账号权限不足，11158）。
+
+修复：`/v1/models` 主动拉名册，失败才退回。名册也加了排序（免费 → 成本 → 延迟）。
+
+### 新增：模型管理说明文档
+
+`模型管理说明.md`（5.2KB，8 章节）—— 覆盖五个能力的用法、接口、实测数据。
+
+### 验证
+
+| 检查 | 结果 |
+|---|---|
+| `?force=1` 返回 200（原来 404） | ✅ |
+| `?force=1&x=y` 也通 | ✅ |
+| 8 个路由全部支持 query | ✅ |
+| kimi 三个模型实测扣费已记录 | ✅ 0.46 / 0.365 / 0.17 |
+| costPerCall 字段 | ✅ |
+| /healthz 显示 v3/config + 名册时间 | ✅ |
+| 启动预热名册 | ✅ |
+| kimi 带 system 后正常（11151 消失） | ✅ |
+| Python / JSON / 5 个 shim 语法 | ✅ |
+
+---
+
 ## [1.5.2] — 2026-11-05
 
 ### 新增：官方模型名册 + 耗费统计
@@ -1138,6 +1271,7 @@ Trae 实测真实对话返回正常（`DeepSeek-V4-Flash-Official`）。
 
 | 版本 | commit | 要点 |
 |---|---|---|
+| 1.5.3 | 待定 | 修 8 个路由的 query bug；成本按实测；模型管理接口 |
 | 1.5.2 | 待定 | 官方模型名册 + 耗费统计；发现 hy4free 免费版 |
 | 1.5.1 | 待定 | 新增 hy3/hy4，目录按实测速度重排，标注成本 |
 | 1.5.0 | 待定 | 自动调节：长期超时的模型自动沉底，分数持久化 |

@@ -227,7 +227,14 @@ async function fetchCatalog(regionId) {
 // ── 聊天请求 ──────────────────────────────────────────────────────────
 function buildQoderBody(input, modelKey) {
   const recordId = randomUUID();
-  const messages = Array.isArray(input.messages) ? input.messages : [];
+  const rawMessages = Array.isArray(input.messages) ? input.messages : [];
+  // 过滤空 content（上游对空字符串报错）
+  const messages = rawMessages.filter((m) => {
+    if (!m || typeof m !== "object") return false;
+    if (Array.isArray(m.tool_calls) && m.tool_calls.length > 0) return true;
+    if (Array.isArray(m.content)) return m.content.length > 0;
+    return typeof m.content === "string" && m.content.trim() !== "";
+  });
   const lastUser = [...messages].reverse().find((m) => m.role === "user");
   const lastText = typeof lastUser?.content === "string" ? lastUser.content : "";
   const parameters = {};
@@ -637,6 +644,46 @@ const server = createServer((req, res) => {
         sendJson(res, 200, { object: "list", data });
       } catch (error) {
         sendError(res, 502, String(error), "upstream");
+      }
+    })();
+    return;
+  }
+
+  // 完整名册（统一格式，与 workbuddy/trae 对齐）
+  if (req.method === "GET" && (url.startsWith("/v3/models") || url.startsWith("/v4/models"))) {
+    (async () => {
+      try {
+        const models = [];
+        for (const region of Object.keys(REGIONS)) {
+          const list = await fetchCatalog(region);
+          for (const m of list) {
+            models.push({
+              id: region + "/" + m.key,
+              display: m.name ?? m.key,
+              cost: m.priceFactor ?? 0,
+              free: (m.priceFactor ?? 0) === 0,
+              multimodal: m.vl === true,
+              reasoning: m.reasoning === true,
+              maxTokens: m.maxInputTokens ?? null,
+              region,
+            });
+          }
+        }
+        // 免费优先，再按成本升序
+        models.sort((a, b) => {
+          const fa = a.free ? 0 : 1;
+          const fb = b.free ? 0 : 1;
+          if (fa !== fb) return fa - fb;
+          return (a.cost ?? 0) - (b.cost ?? 0);
+        });
+        sendJson(res, 200, {
+          ok: true,
+          source: "algo/api/v2/model/list",
+          fetchedAt: new Date().toISOString(),
+          models,
+        });
+      } catch (e) {
+        sendError(res, 502, String(e), "roster_failed");
       }
     })();
     return;

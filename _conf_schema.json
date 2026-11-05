@@ -54,6 +54,21 @@
         "default": "sk-workbuddy-local",
         "hint": "插件与 shim 之间的认证口令，**两端自动同步，一般不用改**。\n\n它是干什么的：\n  1. 插件启动 shim 时，把它作为环境变量传给 shim（如 TRAE_SHIM_TOKEN）\n  2. shim 用它校验每个请求的 Bearer（只接受这个值）\n  3. 插件注册模型时，把同一个值填进 provider 的 key\n  两边必须一致，否则 AstrBot 调模型会被 shim 拒绝（401）。\n\n安全吗：\n  shim 只绑 127.0.0.1，这个 token 只在本机回环上生效。\n  它不是你的 WorkBuddy / Trae / Qoder 账号密钥，\n  改了也不影响客户端登录。\n\n什么时候需要改：\n  同机跑多套插件实例、需要区分时。否则保持默认即可。",
         "obvious_hint": true
+      },
+      "auto_tune": {
+        "description": "自动调节模型顺序",
+        "type": "bool",
+        "default": true,
+        "hint": "**开着就会自己学**：长期超时/失败的模型自动沉到后面，好的浮上来。\n\n怎么算（按健康分 0~100，初始 70）：\n  · 成功一次 **+5**\n  · 超时一次 **−25**（超时最伤，用户等不起）\n  · 其他失败 **−12**\n\n排序规则：分数从高到低，同分按「优先级列表」的顺序。\n分数存盘，重启不丢。\n\n**关掉** = 严格按「优先级列表」固定顺序，不学习。\n\n怎么手动干预：\n  · 想强制某个模型排第一 → 填进「优先级列表」最前面\n  · 分数被玩坏了 → 调 POST .../reset-health 重置回 70\n  · 想看当前分数和实际顺序 → GET .../health?name=<shim名>",
+        "obvious_hint": true
+      },
+      "cost_hint": {
+        "description": "──────  成本说明  ──────",
+        "type": "string",
+        "default": "",
+        "_special": "divider",
+        "hint": "**怎么知道哪些模型免费、哪些花钱？**\n\n看插件页的「模型名册」或者调：\n  GET /api/plugins/extensions/astrbot_plugin_shim_connector/catalog\n\n返回里每个模型带：\n  · `free: true` → 免费\n  · `cost: 0.01` → 每次约扣 0.01 积分\n  · `latencyMs` → 实测延迟\n\n已实测的免费模型（workbuddy）：\n  glm-5.2 / space-bunny / hy3-b / hy3-c / hy3-x /\n  deepseek-v4.1-flash / hy3 / deepseek-v4-flash /\n  deepseek-v4-pro / auto / glm-5.3-flash / hy4free\n\n要钱的：hy4std(0.06) / glm-5.3(0.01) / minimax-m3.1-flash(0.01) /\n         step-5-preview(0.02)\n\n**注意 hy4 分两个版本**：hy4free 免费但慢（5.5s），hy4std 要钱但快（3.5s）。",
+        "obvious_hint": true
       }
     }
   },
@@ -88,6 +103,21 @@
         "type": "string",
         "default": "sk-trae-local",
         "hint": "插件与 shim 之间的认证口令，**两端自动同步，一般不用改**。\n\n它是干什么的：\n  1. 插件启动 shim 时，把它作为环境变量传给 shim（如 TRAE_SHIM_TOKEN）\n  2. shim 用它校验每个请求的 Bearer（只接受这个值）\n  3. 插件注册模型时，把同一个值填进 provider 的 key\n  两边必须一致，否则 AstrBot 调模型会被 shim 拒绝（401）。\n\n安全吗：\n  shim 只绑 127.0.0.1，这个 token 只在本机回环上生效。\n  它不是你的 WorkBuddy / Trae / Qoder 账号密钥，\n  改了也不影响客户端登录。\n\n什么时候需要改：\n  同机跑多套插件实例、需要区分时。否则保持默认即可。",
+        "obvious_hint": true
+      },
+      "auto_tune": {
+        "description": "自动调节模型顺序",
+        "type": "bool",
+        "default": true,
+        "hint": "**开着就会自己学**：长期超时/失败的模型自动沉到后面，好的浮上来。\n\n怎么算（按健康分 0~100，初始 70）：\n  · 成功一次 **+5**\n  · 超时一次 **−25**（超时最伤，用户等不起）\n  · 其他失败 **−12**\n\n排序规则：分数从高到低，同分按「优先级列表」的顺序。\n分数存盘，重启不丢。\n\n**关掉** = 严格按「优先级列表」固定顺序，不学习。\n\n怎么手动干预：\n  · 想强制某个模型排第一 → 填进「优先级列表」最前面\n  · 分数被玩坏了 → 调 POST .../reset-health 重置回 70\n  · 想看当前分数和实际顺序 → GET .../health?name=<shim名>",
+        "obvious_hint": true
+      },
+      "cost_hint": {
+        "description": "──────  成本说明  ──────",
+        "type": "string",
+        "default": "",
+        "_special": "divider",
+        "hint": "**怎么知道哪些模型免费、哪些花钱？**\n\n看插件页的「模型名册」或者调：\n  GET /api/plugins/extensions/astrbot_plugin_shim_connector/catalog\n\n返回里每个模型带：\n  · `free: true` → 免费\n  · `cost: 0.01` → 每次约扣 0.01 积分\n  · `latencyMs` → 实测延迟\n\n已实测的免费模型（workbuddy）：\n  glm-5.2 / space-bunny / hy3-b / hy3-c / hy3-x /\n  deepseek-v4.1-flash / hy3 / deepseek-v4-flash /\n  deepseek-v4-pro / auto / glm-5.3-flash / hy4free\n\n要钱的：hy4std(0.06) / glm-5.3(0.01) / minimax-m3.1-flash(0.01) /\n         step-5-preview(0.02)\n\n**注意 hy4 分两个版本**：hy4free 免费但慢（5.5s），hy4std 要钱但快（3.5s）。",
         "obvious_hint": true
       }
     }
@@ -124,6 +154,21 @@
         "default": "sk-qoder-local",
         "hint": "插件与 shim 之间的认证口令，**两端自动同步，一般不用改**。\n\n它是干什么的：\n  1. 插件启动 shim 时，把它作为环境变量传给 shim（如 TRAE_SHIM_TOKEN）\n  2. shim 用它校验每个请求的 Bearer（只接受这个值）\n  3. 插件注册模型时，把同一个值填进 provider 的 key\n  两边必须一致，否则 AstrBot 调模型会被 shim 拒绝（401）。\n\n安全吗：\n  shim 只绑 127.0.0.1，这个 token 只在本机回环上生效。\n  它不是你的 WorkBuddy / Trae / Qoder 账号密钥，\n  改了也不影响客户端登录。\n\n什么时候需要改：\n  同机跑多套插件实例、需要区分时。否则保持默认即可。",
         "obvious_hint": true
+      },
+      "auto_tune": {
+        "description": "自动调节模型顺序",
+        "type": "bool",
+        "default": true,
+        "hint": "**开着就会自己学**：长期超时/失败的模型自动沉到后面，好的浮上来。\n\n怎么算（按健康分 0~100，初始 70）：\n  · 成功一次 **+5**\n  · 超时一次 **−25**（超时最伤，用户等不起）\n  · 其他失败 **−12**\n\n排序规则：分数从高到低，同分按「优先级列表」的顺序。\n分数存盘，重启不丢。\n\n**关掉** = 严格按「优先级列表」固定顺序，不学习。\n\n怎么手动干预：\n  · 想强制某个模型排第一 → 填进「优先级列表」最前面\n  · 分数被玩坏了 → 调 POST .../reset-health 重置回 70\n  · 想看当前分数和实际顺序 → GET .../health?name=<shim名>",
+        "obvious_hint": true
+      },
+      "cost_hint": {
+        "description": "──────  成本说明  ──────",
+        "type": "string",
+        "default": "",
+        "_special": "divider",
+        "hint": "**怎么知道哪些模型免费、哪些花钱？**\n\n看插件页的「模型名册」或者调：\n  GET /api/plugins/extensions/astrbot_plugin_shim_connector/catalog\n\n返回里每个模型带：\n  · `free: true` → 免费\n  · `cost: 0.01` → 每次约扣 0.01 积分\n  · `latencyMs` → 实测延迟\n\n已实测的免费模型（workbuddy）：\n  glm-5.2 / space-bunny / hy3-b / hy3-c / hy3-x /\n  deepseek-v4.1-flash / hy3 / deepseek-v4-flash /\n  deepseek-v4-pro / auto / glm-5.3-flash / hy4free\n\n要钱的：hy4std(0.06) / glm-5.3(0.01) / minimax-m3.1-flash(0.01) /\n         step-5-preview(0.02)\n\n**注意 hy4 分两个版本**：hy4free 免费但慢（5.5s），hy4std 要钱但快（3.5s）。",
+        "obvious_hint": true
       }
     }
   },
@@ -158,6 +203,21 @@
         "type": "string",
         "default": "sk-workbuddy-intl",
         "hint": "插件与 shim 之间的认证口令，**两端自动同步，一般不用改**。\n\n它是干什么的：\n  1. 插件启动 shim 时，把它作为环境变量传给 shim（如 TRAE_SHIM_TOKEN）\n  2. shim 用它校验每个请求的 Bearer（只接受这个值）\n  3. 插件注册模型时，把同一个值填进 provider 的 key\n  两边必须一致，否则 AstrBot 调模型会被 shim 拒绝（401）。\n\n安全吗：\n  shim 只绑 127.0.0.1，这个 token 只在本机回环上生效。\n  它不是你的 WorkBuddy / Trae / Qoder 账号密钥，\n  改了也不影响客户端登录。\n\n什么时候需要改：\n  同机跑多套插件实例、需要区分时。否则保持默认即可。",
+        "obvious_hint": true
+      },
+      "auto_tune": {
+        "description": "自动调节模型顺序",
+        "type": "bool",
+        "default": true,
+        "hint": "**开着就会自己学**：长期超时/失败的模型自动沉到后面，好的浮上来。\n\n怎么算（按健康分 0~100，初始 70）：\n  · 成功一次 **+5**\n  · 超时一次 **−25**（超时最伤，用户等不起）\n  · 其他失败 **−12**\n\n排序规则：分数从高到低，同分按「优先级列表」的顺序。\n分数存盘，重启不丢。\n\n**关掉** = 严格按「优先级列表」固定顺序，不学习。\n\n怎么手动干预：\n  · 想强制某个模型排第一 → 填进「优先级列表」最前面\n  · 分数被玩坏了 → 调 POST .../reset-health 重置回 70\n  · 想看当前分数和实际顺序 → GET .../health?name=<shim名>",
+        "obvious_hint": true
+      },
+      "cost_hint": {
+        "description": "──────  成本说明  ──────",
+        "type": "string",
+        "default": "",
+        "_special": "divider",
+        "hint": "**怎么知道哪些模型免费、哪些花钱？**\n\n看插件页的「模型名册」或者调：\n  GET /api/plugins/extensions/astrbot_plugin_shim_connector/catalog\n\n返回里每个模型带：\n  · `free: true` → 免费\n  · `cost: 0.01` → 每次约扣 0.01 积分\n  · `latencyMs` → 实测延迟\n\n已实测的免费模型（workbuddy）：\n  glm-5.2 / space-bunny / hy3-b / hy3-c / hy3-x /\n  deepseek-v4.1-flash / hy3 / deepseek-v4-flash /\n  deepseek-v4-pro / auto / glm-5.3-flash / hy4free\n\n要钱的：hy4std(0.06) / glm-5.3(0.01) / minimax-m3.1-flash(0.01) /\n         step-5-preview(0.02)\n\n**注意 hy4 分两个版本**：hy4free 免费但慢（5.5s），hy4std 要钱但快（3.5s）。",
         "obvious_hint": true
       }
     }
@@ -265,6 +325,14 @@
         "default": 70,
         "hint": "新目标（或重置后）的起始分（0~100，默认 70）。\n\n所有目标同分时，就按「优先级列表」的顺序决胜负 ——\n所以填了优先级列表的话，初始顺序仍然是你说了算。",
         "obvious_hint": true
+      },
+      "cost_hint": {
+        "description": "──────  轮换层说明  ──────",
+        "type": "string",
+        "default": "",
+        "_special": "divider",
+        "hint": "这一层是**多个上游轮流用**，不是单一模型。\n\n**自动调节开着时**（默认）：\n  1. 按健康分排序（分数高的先试）\n  2. 同分按「优先级列表」顺序\n  3. 长期超时的自动沉底，成功一次 +5 分慢慢爬回来\n\n**怎么手动调整顺序**：\n  · 填「优先级列表」→ 同分时按你填的顺序\n  · 想强制排第一 → 把它填在列表最前面，并且关掉自动调节\n\n**怎么看当前实际顺序**：\n  GET /api/plugins/extensions/astrbot_plugin_shim_connector/health?name=vision\n\n返回里 `rank` 是实际尝试顺序，`base_rank` 是你在配置里排的位置。\n两者不同 = 自动调节在起作用。",
+        "obvious_hint": true
       }
     }
   },
@@ -370,6 +438,14 @@
         "type": "int",
         "default": 70,
         "hint": "新目标（或重置后）的起始分（0~100，默认 70）。\n\n所有目标同分时，就按「优先级列表」的顺序决胜负 ——\n所以填了优先级列表的话，初始顺序仍然是你说了算。",
+        "obvious_hint": true
+      },
+      "cost_hint": {
+        "description": "──────  轮换层说明  ──────",
+        "type": "string",
+        "default": "",
+        "_special": "divider",
+        "hint": "这一层是**多个上游轮流用**，不是单一模型。\n\n**自动调节开着时**（默认）：\n  1. 按健康分排序（分数高的先试）\n  2. 同分按「优先级列表」顺序\n  3. 长期超时的自动沉底，成功一次 +5 分慢慢爬回来\n\n**怎么手动调整顺序**：\n  · 填「优先级列表」→ 同分时按你填的顺序\n  · 想强制排第一 → 把它填在列表最前面，并且关掉自动调节\n\n**怎么看当前实际顺序**：\n  GET /api/plugins/extensions/astrbot_plugin_shim_connector/health?name=llm_pool\n\n返回里 `rank` 是实际尝试顺序，`base_rank` 是你在配置里排的位置。\n两者不同 = 自动调节在起作用。",
         "obvious_hint": true
       }
     }

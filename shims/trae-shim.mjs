@@ -169,6 +169,130 @@ const MODEL_CATALOG = [
   { id: "qwen3.8-flash",              fn: "solo_agent",     rate: 0.08, display: "Qwen3.8-Flash" },
 ];
 
+// ── 动态模型名册（从客户端 state.vscdb 读）────────────────────
+//
+// Trae 把完整模型清单存在 state.vscdb 的
+//   <id>:AI.agent.model.model_list_map
+// 里，按 agent 分类（solo_agent / solo_work_lite / chat_v3 ...）。
+//
+// 每个模型带 features.consumption_rate.data.rate（积分倍率），
+// 这就是「耗费」的量化值：0.06 表示最便宜那一档。
+
+import { existsSync as _existsSync } from "node:fs";
+import { join as _join } from "node:path";
+import { homedir as _homedir } from "node:os";
+
+/** Trae CN 的 state.vscdb 路径。 */
+function traeVscdbPath() {
+  if (process.env.TRAE_VSCDB) return process.env.TRAE_VSCDB;
+  const h = _homedir();
+  if (process.platform === "win32") {
+    const roaming = process.env.APPDATA || _join(h, "AppData", "Roaming");
+    return _join(roaming, "Trae CN", "User", "globalStorage", "state.vscdb");
+  }
+  if (process.platform === "darwin") {
+    return _join(h, "Library", "Application Support", "Trae CN", "User", "globalStorage", "state.vscdb");
+  }
+  return _join(h, ".config", "Trae CN", "User", "globalStorage", "state.vscdb");
+}
+
+/** 用哪个 agent 的模型列表（默认 solo_agent，模型最全）。 */
+const ROSTER_AGENT = process.env.TRAE_ROSTER_AGENT || "solo_agent";
+
+/** 缓存。 */
+let rosterCache = null;
+let rosterCachedAt = 0;
+const ROSTER_TTL_MS = 5 * 60 * 1000;
+
+/**
+ * 从 vscdb 读模型名册。
+ *
+ * 用 node:sqlite（Node 22+）只读打开。读不到就返回 null，
+ * 调用方退回静态 MODEL_CATALOG。
+ *
+ * @param {boolean} force 忽略缓存
+ * @returns {Promise<Array|null>} [{id, display, rate, multimodal, reasoning}]
+ */
+async function loadRosterFromVscdb(force = false) {
+  if (!force && rosterCache && Date.now() - rosterCachedAt < ROSTER_TTL_MS) {
+    return rosterCache;
+  }
+  const dbPath = traeVscdbPath();
+  if (!_existsSync(dbPath)) {
+    console.error("[trae-shim] vscdb 不存在: " + dbPath);
+    return null;
+  }
+  let DatabaseSync;
+  try {
+    ({ DatabaseSync } = await import("node:sqlite"));
+  } catch (e) {
+    console.error("[trae-shim] node:sqlite 不可用（需要 Node 22+）: " + String(e));
+    return null;
+  }
+  let db;
+  try {
+    db = new DatabaseSync(dbPath, { readOnly: true });
+    // key 前缀是机器 hash，用 LIKE 匹配
+    const row = db.prepare(
+      "SELECT key, value FROM ItemTable WHERE key LIKE '%AI.agent.model.model_list_map' LIMIT 1"
+    ).get();
+    if (!row || !row.value) {
+      console.error("[trae-shim] vscdb 里没有 model_list_map");
+      return null;
+    }
+    const map = JSON.parse(row.value);
+    const list = Array.isArray(map[ROSTER_AGENT]) ? map[ROSTER_AGENT] : null;
+    if (!list) {
+      console.error("[trae-shim] agent '" + ROSTER_AGENT + "' 不存在，可选: " + Object.keys(map).join(", "));
+      return null;
+    }
+    const out = [];
+    for (const m of list) {
+      if (!m || typeof m.name !== "string") continue;
+      if (m.selectable === false || m.status === false) continue;
+      const rate = m.features?.consumption_rate?.data?.rate;
+      out.push({
+        id: m.name,
+        display: m.display_name || m.name,
+        rate: typeof rate === "number" ? rate : null,
+        multimodal: m.multimodal === true || m.features?.multimodal?.enable === true,
+        reasoning: m.model_type === "reasoning_model" || m.features?.reasoning?.enable === true,
+        maxTokens: m.max_tokens ?? null,
+      });
+    }
+    rosterCache = out;
+    rosterCachedAt = Date.now();
+    console.error(
+      "[trae-shim] 从 vscdb 读到 " + out.length + " 个模型（agent=" + ROSTER_AGENT + "）"
+    );
+    return out;
+  } catch (e) {
+    console.error("[trae-shim] 读 vscdb 失败: " + String(e));
+    return null;
+  } finally {
+    try { db?.close(); } catch { /* ignore */ }
+  }
+}
+
+/** 当前生效的模型 id 列表（动态优先，退回静态）。 */
+async function activeModelIds() {
+  const roster = await loadRosterFromVscdb();
+  if (roster && roster.length > 0) return roster.map((m) => m.id);
+  return MODEL_CATALOG.map((m) => m.id);
+}
+
+/** 查某个模型的详情（动态优先，退回静态）。 */
+async function describeModel(id) {
+  const roster = await loadRosterFromVscdb();
+  if (roster) {
+    const hit = roster.find((m) => m.id === id || m.display === id);
+    if (hit) return hit;
+  }
+  const st = MODEL_CATALOG.find((m) => m.id === id);
+  if (st) return { id: st.id, display: st.display, rate: st.rate, multimodal: true, reasoning: false };
+  return null;
+}
+
 /** 客户端里看到的 display_name → 上游真实 config_name，允许直接用显示名调用 */
 const MODEL_ALIAS = {
   "Seed-Code": "Doubao-Seed-Code",
@@ -406,7 +530,14 @@ function toTraeBody(input) {
   const { id: model, fn: modelFn } = resolveModel(input.model);
   const messages = Array.isArray(input.messages) ? input.messages : [];
   const RAW = process.env.TRAE_SHIM_RAW === "1";
-  const shaped = messages.map((m) => {
+  // 过滤空 content（上游对空字符串报 11151，kimi 系尤其严格）
+  const cleaned = messages.filter((m) => {
+    if (!m || typeof m !== "object") return false;
+    if (Array.isArray(m.tool_calls) && m.tool_calls.length > 0) return true;
+    if (Array.isArray(m.content)) return m.content.length > 0;
+    return typeof m.content === "string" && m.content.trim() !== "";
+  });
+  const shaped = cleaned.map((m) => {
     if (RAW) return m;
     const out = { ...m, content: normalizeContent(m.content) };
     if (Array.isArray(m.tool_calls) && m.tool_calls.length > 0) {
@@ -416,6 +547,8 @@ function toTraeBody(input) {
     }
     return out;
   });
+  // 注意：Trae 上游**不接受 system 角色**（加了会 4001 bad request）。
+  // 所以这里不注入 system，只做空消息过滤。
   const body = {
     messages: shaped,
     model,
@@ -673,18 +806,95 @@ const server = createServer((req, res) => {
     return;
   }
   if (!bearerOk(req)) { sendError(res, 401, "missing or invalid Authorization bearer", "unauthorized"); return; }
-  if (req.method === "GET" && (url === "/v1/models" || url === "/v1/models/")) {
-    sendJson(res, 200, {
-      object: "list",
-      data: MODEL_CATALOG.map((m) => ({
+  // 完整名册（动态，从 vscdb 读）
+  if (req.method === "GET" && (url.startsWith("/v3/models") || url.startsWith("/v4/models"))) {
+    (async () => {
+      const force = url.includes("force=1");
+      const roster = await loadRosterFromVscdb(force);
+      if (!roster) {
+        sendJson(res, 200, {
+          ok: false,
+          source: "none",
+          agent: ROSTER_AGENT,
+          vscdb: traeVscdbPath(),
+          message: "vscdb 读取失败，请检查 Trae 是否安装并登录",
+          models: [],
+        });
+        return;
+      }
+      // 按 rate 升序（便宜的在前），rate 为 null 的排最后
+      const rows = roster.map((m) => ({
         id: m.id,
-        object: "model",
-        created: 0,
-        owned_by: "trae",
-        display_name: m.display,
-        price_factor: m.rate,
-        function: m.fn,
-      })),
+        display: m.display,
+        cost: m.rate,
+        rate: m.rate,
+        free: m.rate === 0,
+        multimodal: m.multimodal,
+        reasoning: m.reasoning,
+        maxTokens: m.maxTokens,
+      }));
+      rows.sort((a, b) => {
+        const ca = a.cost === null ? 9999 : a.cost;
+        const cb = b.cost === null ? 9999 : b.cost;
+        return ca - cb;
+      });
+      sendJson(res, 200, {
+        ok: true,
+        source: "vscdb",
+        agent: ROSTER_AGENT,
+        vscdb: traeVscdbPath(),
+        fetchedAt: new Date().toISOString(),
+        models: rows,
+      });
+    })().catch((e) => {
+      if (!res.headersSent) sendError(res, 500, String(e), "internal");
+    });
+    return;
+  }
+
+  // OpenAI 兼容：优先用动态名册
+  if (req.method === "GET" && (url === "/v1/models" || url === "/v1/models/")) {
+    (async () => {
+      const roster = await loadRosterFromVscdb();
+      if (roster && roster.length > 0) {
+        sendJson(res, 200, {
+          object: "list",
+          source: "vscdb",
+          data: roster.map((m) => ({
+            id: m.id,
+            object: "model",
+            created: 0,
+            owned_by: "trae",
+            display_name: m.display,
+            price_factor: m.rate,
+            free: m.rate === 0,
+            multimodal: m.multimodal,
+            is_reasoning: m.reasoning,
+            function: MODEL_CATALOG.find((x) => x.id === m.id)?.fn ?? "solo_work_lite",
+          })).sort((a, b) => {
+            const ca = a.price_factor === null ? 9999 : a.price_factor;
+            const cb = b.price_factor === null ? 9999 : b.price_factor;
+            return ca - cb;
+          }),
+        });
+        return;
+      }
+      // 退回静态
+      sendJson(res, 200, {
+        object: "list",
+        source: "static",
+        data: MODEL_CATALOG.map((m) => ({
+          id: m.id,
+          object: "model",
+          created: 0,
+          owned_by: "trae",
+          display_name: m.display,
+          price_factor: m.rate,
+          function: m.fn,
+        })),
+      });
+    })().catch((e) => {
+      if (!res.headersSent) sendError(res, 500, String(e), "internal");
     });
     return;
   }

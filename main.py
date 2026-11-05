@@ -1593,7 +1593,10 @@ class ShimConnector(Star):
             ("restart", self._api_restart, ["POST"], "重启指定 shim"),
             ("toggle", self._api_toggle, ["POST"], "切换指定 shim 启停"),
             ("refresh-models", self._api_refresh_models, ["POST"], "探测上游模型"),
-            ("models", self._api_models, ["GET"], "上游官方模型名册"),
+            ("catalog", self._api_catalog, ["GET"], "聚合三家的完整名册（含成本/勾选/顺序）"),
+            ("select-models", self._api_select_models, ["POST"], "保存模型勾选与顺序"),
+            ("auto-tune", self._api_auto_tune, ["GET", "POST"], "读/写自动调节开关"),
+            ("models", self._api_models, ["GET"], "单家官方模型名册"),
             ("cost", self._api_cost, ["GET"], "耗费统计"),
             ("cost-reset", self._api_cost_reset, ["POST"], "重置耗费统计"),
             ("health", self._api_health, ["GET"], "轮换层健康分"),
@@ -1827,28 +1830,31 @@ class ShimConnector(Star):
 
 
     async def _api_refresh_models(self):
-        """探测上游实际可用的模型（只对 workbuddy 系 shim 有效）。
+        """从**该 shim 自己的官方名册**重新同步模型，并注册成 provider。
 
-        上游没有 /v1/models 接口，只能靠候选名并发探测。
-        探测结果由 shim 写入 .wb-models.json，下次启动直接复用。
+        只影响请求里指定的那个 shim —— 传 workbuddy 就只动 workbuddy，
+        不碰 trae / qoder。
+
+        各 shim 的名册来源：
+            workbuddy  -> 官方 /v3/config（需 UA）
+            trae       -> 客户端 state.vscdb
+            qoder      -> algo/api/v2/model/list
 
         请求体（可选）：
-            {"name": "workbuddy"}   —— 指定哪个 shim，默认 workbuddy
+            {"name": "workbuddy"}    指定 shim，默认 workbuddy
+            {"name": "trae"}
+            {"name": "qoder"}
+            {"register": true}       是否顺便注册 provider（默认 true）
 
         返回：
-            {ok, count, elapsedMs, models: [...], savedTo}
+            {ok, name, source, total, free, paid, registered, skipped, models}
         """
 
         async def handler():
             body = await self._api_body()
             name = str(body.get("name") or "workbuddy").strip()
             self._require_name(name)
-
-            spec = self._all_defs()[name]
-            if not spec["script"].startswith("workbuddy-shim"):
-                raise ValueError(
-                    f"{name} 不支持模型探测（只有 workbuddy 系 shim 有该能力）"
-                )
+            do_register = body.get("register", True) is not False
 
             port = self._port(name)
             if await port_free_async(port):
@@ -1856,48 +1862,83 @@ class ShimConnector(Star):
                     f"{name} 未在运行（端口 {port} 空闲），请先启动它再刷新"
                 )
 
-            url = f"http://127.0.0.1:{port}/refresh-models"
             token = self._token(name)
-            logger.info(f"[shim_connector] {name} 开始探测上游模型...")
+
+            # 拉官方名册（三家都有 /v3/models）
+            logger.info(f"[shim_connector] {name} 从官方名册同步模型...")
             try:
                 async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        url,
+                    async with session.get(
+                        f"http://127.0.0.1:{port}/v3/models",
                         headers={"Authorization": f"Bearer {token}"},
-                        timeout=aiohttp.ClientTimeout(total=600),
+                        timeout=aiohttp.ClientTimeout(total=120),
                     ) as resp:
                         text = await resp.text()
                         if resp.status != 200:
                             raise RuntimeError(
-                                f"探测失败 HTTP{resp.status}: {text[:300]}"
+                                f"拉名册失败 HTTP{resp.status}: {text[:300]}"
                             )
                         data = json.loads(text)
             except aiohttp.ClientError as exc:
-                raise RuntimeError(f"探测请求失败: {exc}") from exc
+                raise RuntimeError(f"请求 shim 失败: {exc}") from exc
 
-            count = data.get("count", 0)
+            models = data.get("models") or []
+            if not models:
+                raise RuntimeError(
+                    data.get("message")
+                    or f"{name} 的 shim 没返回模型（可能名册源不可用）"
+                )
+
+            source = data.get("source") or "unknown"
+            free_n = sum(1 for m in models if m.get("free") is True)
+            paid_n = len(models) - free_n
             logger.info(
-                f"[shim_connector] {name} 探测完成，发现 {count} 个可用模型"
+                f"[shim_connector] {name} 名册同步完成："
+                f"{len(models)} 个（免费 {free_n} / 付费 {paid_n}），来源 {source}"
             )
-            return {
+
+            result = {
                 "ok": True,
                 "name": name,
-                "count": count,
-                "elapsedMs": data.get("elapsedMs"),
-                "models": data.get("models", []),
-                "savedTo": data.get("savedTo"),
-                "hint": "已写入 shim 缓存，下次启动自动复用。"
-                        "想让 AstrBot 注册新模型：把配置里的 models 留空"
-                        "（= 全部）并重载插件。",
+                "source": source,
+                "total": len(models),
+                "free": free_n,
+                "paid": paid_n,
+                "models": [
+                    {
+                        "id": m.get("id"),
+                        "cost": m.get("cost"),
+                        "free": m.get("free"),
+                        "latencyMs": m.get("latencyMs"),
+                    }
+                    for m in models
+                ],
+                "registered": 0,
+                "skipped": 0,
             }
+
+            # 顺便注册 provider（只动这个 shim 的）
+            if do_register:
+                before = len(self.registered)
+                await self._register_provider(name)
+                added = len(self.registered) - before
+                result["registered"] = added
+                result["skipped"] = len(models) - added
+                logger.info(
+                    f"[shim_connector] {name} 注册 provider：新增 {added} 个，"
+                    f"跳过 {len(models) - added} 个（已存在或未勾选）"
+                )
+
+            result["hint"] = (
+                f"只更新了 {name}。想让 AstrBot 模型列表立刻看到新模型，"
+                f"需要重载插件或重启该 shim。"
+            )
+            return result
 
         try:
             return await self._api_response(await handler())
         except (ValueError, RuntimeError) as exc:
             return await self._api_response({"ok": False, "message": str(exc)}, 400)
-
-
-    # ── 健康分（自动调节）─────────────────────────────────────
 
     async def _proxy_shim(self, name: str, path: str, method: str = "GET") -> dict:
         """转发请求到 shim 的内部接口。
@@ -2046,6 +2087,206 @@ class ShimConnector(Star):
             data = await self._proxy_shim(name, "/cost/reset", "POST")
             logger.info(f"[shim_connector] {name} 耗费统计已重置")
             return {"ok": True, "name": name, "shim": data}
+
+        try:
+            return await self._api_response(await handler())
+        except (ValueError, RuntimeError) as exc:
+            return await self._api_response({"ok": False, "message": str(exc)}, 400)
+
+
+    # ── 模型选择与排序（1.5.3）─────────────────────────────────
+
+    async def _api_catalog(self):
+        """聚合三个 shim 的完整模型名册，带上「是否已启用」和「当前顺序」。
+
+        查询参数：
+            ?name=workbuddy|trae|qoder   只查一家（不传则全查）
+
+        返回每家的：models[]（含 cost/free/延迟）+ 配置里的 selected + order。
+        """
+
+        async def handler():
+            shops = ["workbuddy", "trae", "qoder"]
+            if _quart_request is not None:
+                try:
+                    one = str(_quart_request.args.get("name") or "").strip()
+                    if one:
+                        shops = [one]
+                except Exception:  # noqa: BLE001
+                    pass
+
+            out = {}
+            for name in shops:
+                self._require_name(name)
+                port = self._port(name)
+                entry = {"name": name, "port": port, "running": False, "models": [], "error": None}
+                try:
+                    if await port_free_async(port):
+                        entry["error"] = f"未运行（端口 {port} 空闲）"
+                        out[name] = entry
+                        continue
+                    entry["running"] = True
+                    data = await self._proxy_shim(name, "/v3/models")
+                    models = data.get("models") or []
+                    # 静态目录兜底（老 shim 没有 /v3/models）
+                    if not models:
+                        try:
+                            legacy = await self._proxy_shim(name, "/v1/models")
+                            models = [
+                                {
+                                    "id": m.get("id"),
+                                    "display": m.get("display_name") or m.get("id"),
+                                    "cost": m.get("price_factor"),
+                                    "free": (m.get("price_factor") or 0) == 0,
+                                    "multimodal": bool(m.get("multimodal") or m.get("is_vl")),
+                                    "reasoning": bool(m.get("is_reasoning")),
+                                }
+                                for m in (legacy.get("data") or [])
+                            ]
+                        except Exception:  # noqa: BLE001
+                            pass
+
+                    section = self.config.get(name, {}) if isinstance(self.config, dict) else {}
+                    selected = self._as_str_list(section.get("models"))
+                    # 空 = 全部
+                    sel_set = set(selected)
+                    all_off = len(selected) == 0
+
+                    # 当前顺序（priority 列表 + 健康分）
+                    priority = self._as_str_list(section.get("priority"))
+
+                    for m in models:
+                        mid = m.get("id")
+                        # 只有 workbuddy 系的 id 不带 source 前缀
+                        full = mid if "/" in str(mid) else f"{self._all_defs()[name]['source_id']}/{mid}"
+                        m["provider_id"] = full
+                        m["selected"] = True if all_off else (mid in sel_set or full in sel_set)
+                        if mid in priority or full in priority:
+                            idx = priority.index(mid) if mid in priority else priority.index(full)
+                            m["priority_index"] = idx
+                        else:
+                            m["priority_index"] = None
+
+                    # 按「已选 + 优先级 + 免费 + 成本 + 延迟」排序
+                    def sort_key(m):
+                        sel = 0 if m.get("selected") else 1
+                        pri = m.get("priority_index")
+                        pri_k = pri if pri is not None else 9999
+                        free = 0 if m.get("free") else 1
+                        cost = m.get("cost") if m.get("cost") is not None else 999
+                        lat = m.get("latencyMs") if m.get("latencyMs") is not None else 99999
+                        return (sel, pri_k, free, cost, lat)
+
+                    models.sort(key=sort_key)
+                    entry["models"] = models
+                    entry["auto_tune"] = self._auto_tune(name) if name in ("vision", "llm_pool") else None
+                except Exception as exc:  # noqa: BLE001
+                    entry["error"] = str(exc)
+                out[name] = entry
+
+            return {"ok": True, "catalog": out}
+
+        try:
+            return await self._api_response(await handler())
+        except (ValueError, RuntimeError) as exc:
+            return await self._api_response({"ok": False, "message": str(exc)}, 400)
+
+    async def _api_select_models(self):
+        """保存「哪些模型可用」和「顺序」。
+
+        请求体：
+            {
+              "name": "workbuddy",
+              "models": ["hy4free", "hy3-b"],     // 勾选的（空数组 = 全部）
+              "priority": ["hy3-b", "hy4free"]    // 顺序（可空 = 按默认）
+            }
+        """
+
+        async def handler():
+            body = await self._api_body()
+            name = str(body.get("name") or "workbuddy").strip()
+            self._require_name(name)
+
+            models = body.get("models")
+            priority = body.get("priority")
+            if models is not None and not isinstance(models, list):
+                raise ValueError("models 必须是数组")
+            if priority is not None and not isinstance(priority, list):
+                raise ValueError("priority 必须是数组")
+
+            section = self.config.setdefault(name, {})
+            if models is not None:
+                section["models"] = [str(x).strip() for x in models if str(x).strip()]
+            if priority is not None:
+                section["priority"] = [str(x).strip() for x in priority if str(x).strip()]
+
+            # 写回配置文件
+            conf_path = self._conf_file_path()
+            try:
+                conf_path.write_text(
+                    json.dumps(self.config, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(f"写配置失败: {exc}") from exc
+
+            logger.info(
+                f"[shim_connector] {name} 模型选择已保存："
+                f"{len(section.get('models') or [])} 个勾选，"
+                f"{len(section.get('priority') or [])} 个优先级"
+            )
+            return {
+                "ok": True,
+                "name": name,
+                "models": section.get("models") or [],
+                "priority": section.get("priority") or [],
+                "hint": "已写入配置。需要重启该 shim 或重载插件让 AstrBot 重新注册 provider。",
+            }
+
+        try:
+            return await self._api_response(await handler())
+        except (ValueError, RuntimeError) as exc:
+            return await self._api_response({"ok": False, "message": str(exc)}, 400)
+
+    async def _api_auto_tune(self):
+        """读/写自动调节开关。
+
+        GET  ?name=vision       读
+        POST {"name":"vision","enabled":true}   写
+        """
+
+        async def handler():
+            body = await self._api_body()
+            name = str(body.get("name") or "").strip()
+            if not name and _quart_request is not None:
+                try:
+                    name = str(_quart_request.args.get("name") or "").strip()
+                except Exception:  # noqa: BLE001
+                    pass
+            name = name or "vision"
+            self._require_name(name)
+            if name not in ("vision", "llm_pool"):
+                raise ValueError(f"{name} 没有自动调节（只有 vision / llm_pool 有）")
+
+            if body and "enabled" in body:
+                section = self.config.setdefault(name, {})
+                section["auto_tune"] = bool(body.get("enabled"))
+                conf_path = self._conf_file_path()
+                conf_path.write_text(
+                    json.dumps(self.config, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                logger.info(
+                    f"[shim_connector] {name} 自动调节 → "
+                    f"{'开' if section['auto_tune'] else '关'}"
+                )
+
+            return {
+                "ok": True,
+                "name": name,
+                "enabled": self._auto_tune(name),
+                "params": self._tune_params(name),
+            }
 
         try:
             return await self._api_response(await handler())

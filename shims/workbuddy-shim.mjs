@@ -57,55 +57,48 @@ const KEY_FETCH_TIMEOUT_MS = 10000;
 const APP_EXECUTABLE_MISS_TTL_MS = 60000;
 
 /**
- * 模型目录 —— 来自官方 /v3/config 名册，按「免费优先 + 速度」排序。
+ * 模型目录 —— 成本以**实测 credit / 调用次数**为准（2026-11-05）。
  *
- * 数据来源：2026-11-05 实测（固定 prompt「1+1=?」，max_tokens 1500）。
- * credit 是该次调用实际扣费（上游 usage.credit）。
+ * 重要：名册里 `cost: 0` **不代表真免费**。
+ * kimi 三个在 /v3/models 里标 cost=0，但实测每次都扣钱：
+ *   kimi-k3-1        3 次  1.38  → 0.46/次
+ *   kimi-k3.1-pro    2 次  0.73  → 0.37/次
+ *   kimi-k2.8-preview 2 次 0.34  → 0.17/次
  *
- * | 模型                  | 延迟   | credit | 备注 |
- * |-----------------------|--------|--------|------|
- * | glm-5.2               | 1499ms | 0      | 免费，最快 |
- * | space-bunny           | 1532ms | 0      | 免费，多模态 |
- * | hy3-b                 | 1596ms | 0      | 免费，混元 |
- * | hy3-c                 | 1617ms | 0      | 免费，混元 |
- * | hy3-x                 | 1904ms | 0      | 免费，混元 |
- * | deepseek-v4.1-flash   | 2088ms | 0      | 免费 |
- * | hy3                   | 2133ms | 0      | 免费，混元 |
- * | deepseek-v4-flash     | 2161ms | 0      | 免费 |
- * | minimax-m3.1-flash    | 2173ms | 0.01   | 极便宜 |
- * | deepseek-v4-pro       | 2281ms | 0      | 免费 |
- * | auto                  | 2330ms | 0      | 免费，自动选择 |
- * | step-5-preview        | 2718ms | 0.02   | |
- * | glm-5.3-flash         | 2898ms | 0      | 免费 |
- * | glm-5.3               | 3107ms | 0.01   | |
- * | hy4std                | 3499ms | 0.06   | 混元标准版，付费 |
- * | hy4free               | 5521ms | 0      | 混元免费版，推理强但慢 |
- * | mimo-v2.6-pro         | 7078ms | 0      | 免费但很慢 |
+ * 只有 codewise-jump 是**实测确认真免费**（4 次调用，credit 精确为 0）。
  *
- * 不可用（502，权限不足）：deepseek-v4-flash-ioa / deepseek-v4-pro-ioa /
- * kimi-k2.8-preview / kimi-k3-1 / kimi-k3.1-pro
- *
- * 注意：credit 会有波动，同一模型不同次调用可能 0~0.03，
- * 以 /cost 接口的实际累计为准。
+ * cost 字段 = 单次平均 credit（实测），free = cost === 0 且有实测证据。
+ * verified: true 表示有实测数据，false 表示按上游 rate 推测。
  */
 const MODEL_CATALOG = [
-  { id: "glm-5.2",                  note: "免费 · 最快 1.5s" },
-  { id: "space-bunny",              note: "免费 · 多模态 1.5s" },
-  { id: "hy3-b",                    note: "免费 · 混元 1.6s" },
-  { id: "hy3-c",                    note: "免费 · 混元 1.6s" },
-  { id: "hy3-x",                    note: "免费 · 混元 1.9s" },
-  { id: "deepseek-v4.1-flash",      note: "免费 2.1s" },
-  { id: "hy3",                      note: "免费 · 混元 2.1s" },
-  { id: "deepseek-v4-flash",        note: "免费 2.2s" },
-  { id: "minimax-m3.1-flash",       note: "0.01 · 2.2s" },
-  { id: "deepseek-v4-pro",          note: "免费 2.3s" },
-  { id: "auto",                     note: "免费 · 自动选择 2.3s" },
-  { id: "step-5-preview",           note: "0.02 · 2.7s" },
-  { id: "glm-5.3-flash",            note: "免费 2.9s" },
-  { id: "glm-5.3",                  note: "0.01 · 3.1s" },
-  { id: "hy4std",                   note: "0.06 · 混元标准版 3.5s" },
-  { id: "hy4free",                  note: "免费 · 混元推理，强但慢 5.5s" },
-  { id: "mimo-v2.6-pro",            note: "免费但很慢 7.1s" },
+  // ── 实测真免费（credit 精确为 0）──
+  { id: "codewise-jump",            lat: 671,  cost: 0,     verified: true,  note: "真免费 · 最快 · 仅文本（视觉返回空）" },
+  { id: "glm-5.2",                  lat: 1499, cost: 0,     verified: false, note: "名册标 0，未大量实测" },
+  { id: "space-bunny",              lat: 1532, cost: 0.056, verified: true,  note: "实测 0.056/次 · 多模态" },
+  { id: "hy3-b",                    lat: 1596, cost: 0,     verified: false, note: "名册标 0" },
+  { id: "hy3-c",                    lat: 1617, cost: 0,     verified: false, note: "名册标 0" },
+  { id: "hy3-x",                    lat: 1904, cost: 0,     verified: false, note: "名册标 0" },
+  { id: "deepseek-v4.1-flash",      lat: 2088, cost: 0.044, verified: true,  note: "实测 0.044/次" },
+  { id: "hy3",                      lat: 2133, cost: 0,     verified: false, note: "名册标 0" },
+  { id: "deepseek-v4-flash",        lat: 2161, cost: 0,     verified: false, note: "名册标 0" },
+  { id: "deepseek-v4-pro",          lat: 2281, cost: 0,     verified: false, note: "名册标 0" },
+  { id: "auto",                     lat: 2330, cost: 0,     verified: false, note: "名册标 0 · 自动选择" },
+  { id: "glm-5.3-flash",            lat: 2898, cost: 0,     verified: false, note: "名册标 0" },
+  { id: "hy4free",                  lat: 5521, cost: 0,     verified: true,  note: "实测免费 · 混元推理 · 强但慢" },
+  { id: "mimo-v2.6-pro",            lat: 7078, cost: 0,     verified: false, note: "名册标 0 · 很慢" },
+  // ── 实测要钱 ──
+  { id: "kimi-k3-1",                lat: 4233, cost: 0.46,  verified: true,  note: "实测 0.46/次 · 贵 · 需 system" },
+  { id: "kimi-k3.1-pro",            lat: 4681, cost: 0.365, verified: true,  note: "实测 0.365/次 · 需 system" },
+  { id: "kimi-k2.8-preview",        lat: 2783, cost: 0.17,  verified: true,  note: "实测 0.17/次 · 需 system" },
+  { id: "minimax-m3.1-flash",       lat: 2173, cost: 0.01,  verified: false, note: "名册标 0.01" },
+  { id: "glm-5.3",                  lat: 3107, cost: 0.01,  verified: false, note: "名册标 0.01" },
+  { id: "step-5-preview",           lat: 2718, cost: 0.02,  verified: false, note: "名册标 0.02" },
+  { id: "hy4std",                   lat: 3499, cost: 0.06,  verified: true,  note: "实测 0.06~0.29/次 · 混元标准版" },
+  // ── intl 区专用 ──
+  { id: "default-model",            lat: 1329, cost: 0,     verified: true,  note: "intl · 实测免费" },
+  { id: "deepseek-v4.1-flash-sg",   lat: 1737, cost: 0,     verified: true,  note: "intl · 实测免费" },
+  { id: "max-model",                lat: 2541, cost: 0.02,  verified: true,  note: "intl · 最强档" },
+  { id: "kimi-k3",                  lat: 5015, cost: 0.06,  verified: true,  note: "intl · 实测 0.06/次 · 需 system" },
 ];
 
 /**
@@ -254,8 +247,28 @@ async function fetchRoster(cred, force = false) {
     }
   })(doc.data);
 
+  // 排序：有实测数据的先（免费 + 快），没数据的排最后
+  const meta = new Map(MODEL_CATALOG.map((m) => [m.id, m]));
+  const sorted = [...models].sort((a, b) => {
+    const ma = meta.get(a);
+    const mb = meta.get(b);
+    // 有成本信息 < 无信息
+    if (!!ma !== !!mb) return ma ? -1 : 1;
+    if (ma && mb) {
+      // 免费优先
+      const fa = ma.cost === 0 ? 0 : 1;
+      const fb = mb.cost === 0 ? 0 : 1;
+      if (fa !== fb) return fa - fb;
+      // 同免费/同付费：先比成本，再比延迟
+      if (ma.cost !== mb.cost) return ma.cost - mb.cost;
+      return ma.lat - mb.lat;
+    }
+    // 都没信息：按字母
+    return a.localeCompare(b);
+  });
+
   rosterCache = {
-    models: [...models].sort(),
+    models: sorted,
     promotions: doc.data.modelPromotions || [],
     config: doc.data.config || {},
     fetchedAt: new Date().toISOString(),
@@ -812,9 +825,53 @@ function prepareChatBody(raw) {
     for (const m of obj.messages) {
       if (m && m.role === "developer") m.role = "system";
     }
-    // 4) 首条不是 system 就补一个空 system，避免上游按身份声明拒绝
+    // 4) 首条不是 system 就补一个**非空** system
+    //
+    // 两个坑叠在一起：
+    //
+    // 坑 A：原来补的是 content:"" 的空 system，上游把空字符串也当"空内容"，
+    //       报 11151 "a message has empty content"。
+    //
+    // 坑 B：kimi 系列（kimi-k3-1 / kimi-k3.1-pro / kimi-k2.8-preview）
+    //       **必须**带 system 消息，不带就 11151。
+    //
+    // 实测：
+    //   kimi-k3-1  无 system        → ❌ 11151
+    //   kimi-k3-1  有 system（非空）→ ✅ 正常返回
+    //   codewise-jump 不需要 system → ✅ 加了也不影响
+    //
+    // 结论：统一补一条非空 system，对所有模型都安全。
+    // 排查提示：下游看到 11151 先怀疑「system 缺失或为空」，别看错误码字面意思。
     if (obj.messages.length === 0 || obj.messages[0].role !== "system") {
-      obj.messages.unshift({ role: "system", content: "" });
+      obj.messages.unshift({
+        role: "system",
+        content: process.env.WB_SYSTEM_PROMPT || "You are a helpful assistant.",
+      });
+    }
+
+    // 5) 清掉所有空 content 的消息（11151 的另一个来源）
+    //    只保留有实际内容的，或带 tool_calls / 图片的
+    obj.messages = obj.messages.filter((m, i) => {
+      if (!m || typeof m !== "object") return false;
+      // system 必须有内容
+      if (m.role === "system") {
+        return typeof m.content === "string" && m.content.trim() !== "";
+      }
+      // assistant 带 tool_calls 的允许 content 为空
+      if (m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length > 0) {
+        return true;
+      }
+      // 多模态数组：只要有任意 part 有内容就保留
+      if (Array.isArray(m.content)) {
+        return m.content.length > 0;
+      }
+      // 其余必须有非空字符串
+      return typeof m.content === "string" && m.content.trim() !== "";
+    });
+
+    // 6) 过滤后如果连 user 消息都没了，补一条，否则上游会报别的错
+    if (!obj.messages.some((m) => m.role === "user")) {
+      obj.messages.push({ role: "user", content: "请继续。" });
     }
   }
   return JSON.stringify(obj);
@@ -1012,14 +1069,35 @@ async function handleChat(req, res) {
 const server = createServer((req, res) => {
   const url = req.url ?? "/";
 
-  if (req.method === "GET" && (url === "/healthz" || url === "/healthz/")) {
-    sendJson(res, 200, { ok: true, region: REGION, port: PORT });
+  if (req.method === "GET" && (url === "/healthz" || url === "/healthz/" || url.startsWith("/healthz?"))) {
+    sendJson(res, 200, {
+      ok: true,
+      region: REGION,
+      port: PORT,
+      // 名册来源（v3/config 或 probe）
+      modelsSource: rosterCache ? "v3/config" : "probe",
+      modelCount: rosterCache ? rosterCache.models.length : ACTIVE_MODELS.length,
+      rosterFetchedAt: rosterCache ? rosterCache.fetchedAt : null,
+      // 耗费概况
+      costTotal: Number(
+        Object.values(costStats.byModel || {}).reduce(
+          (s, x) => s + (Number(x.credit) || 0), 0
+        ).toFixed(4)
+      ),
+      costCalls: Object.values(costStats.byModel || {}).reduce(
+        (s, x) => s + (Number(x.calls) || 0), 0
+      ),
+      // 目录里实测免费的模型数
+      verifiedFreeModels: MODEL_CATALOG.filter(
+        (m) => m.verified === true && m.cost === 0
+      ).map((m) => m.id),
+    });
     return;
   }
 
   // 调试端点：用真实凭据查上游 model 名册（WB_DEBUG=1 时启用）
   if (process.env.WB_DEBUG === "1" && req.method === "GET" &&
-      (url === "/debug-v3-config" || url === "/debug-v3-config/")) {
+      (url === "/debug-v3-config" || url === "/debug-v3-config/" || url.startsWith("/debug-v3-config?"))) {
     (async () => {
       const cred = await resolveCredential().catch((e) => {
         sendError(res, 500, "凭据加载失败: " + String(e), "no_cred");
@@ -1063,17 +1141,45 @@ const server = createServer((req, res) => {
   }
 
   // 官方模型名册（/v3/config）—— 完整清单 + 计费规则 + 促销
-  if (req.method === "GET" && (url === "/v3/models" || url === "/v3/models/")) {
+  if (req.method === "GET" && (url === "/v3/models" || url === "/v3/models/" || url.startsWith("/v3/models?"))) {
     (async () => {
       const cred = await resolveCredential().catch(() => null);
       if (!cred) {
         sendError(res, 500, "无法加载凭据", "no_cred");
         return;
       }
-      const force = url.includes("force=1") || (req.url || "").includes("force=1");
+      const force = /[?&]force=(1|true|yes)\b/i.test(url);
       try {
         const roster = await fetchRoster(cred, force);
-        sendJson(res, 200, { ok: true, ...roster });
+        // 补充成本/延迟信息（来自实测目录）
+        const meta = new Map(MODEL_CATALOG.map((m) => [m.id, m]));
+        const models = roster.models.map((id) => {
+          const m = meta.get(id);
+          return {
+            id,
+            display: id,
+            cost: m ? m.cost : null,
+            free: m ? m.cost === 0 : null,
+            latencyMs: m ? m.lat : null,
+            note: m ? m.note : "",
+            // 免费模型立即可用；付费模型也返回，由上层决定是否启用
+            selectable: true,
+          };
+        });
+        // 按「免费优先 + 延迟」排序
+        models.sort((a, b) => {
+          const fa = a.free === true ? 0 : 1;
+          const fb = b.free === true ? 0 : 1;
+          if (fa !== fb) return fa - fb;
+          return (a.latencyMs ?? 99999) - (b.latencyMs ?? 99999);
+        });
+        sendJson(res, 200, {
+          ok: true,
+          source: "v3/config",
+          fetchedAt: roster.fetchedAt,
+          models,
+          promotions: roster.promotions,
+        });
       } catch (e) {
         sendError(res, 502, String(e && e.message ? e.message : e), "roster_failed");
       }
@@ -1091,15 +1197,25 @@ const server = createServer((req, res) => {
     const totalFails = Object.values(byModel).reduce((s, x) => s + (Number(x.fails) || 0), 0);
     // 按耗费降序
     const rows = Object.entries(byModel)
-      .map(([id, x]) => ({
-        model: id,
-        calls: x.calls || 0,
-        fails: x.fails || 0,
-        credit: Number((x.credit || 0).toFixed(4)),
-        free: (x.credit || 0) === 0,
-        promptTokens: x.promptTokens || 0,
-        completionTokens: x.completionTokens || 0,
-      }))
+      .map(([id, x]) => {
+        const calls = x.calls || 0;
+        const credit = Number((x.credit || 0).toFixed(4));
+        // 单次平均耗费（更直观）
+        const costPerCall = calls > 0 ? Number((credit / calls).toFixed(4)) : null;
+        return {
+          model: id,
+          calls,
+          fails: x.fails || 0,
+          credit,
+          costPerCall,
+          // free 按**实测**算：有成功调用且累计 credit 为 0 才算真免费
+          free: calls > 0 && credit === 0,
+          // 有实测数据（区别于猜的）
+          measured: calls > 0,
+          promptTokens: x.promptTokens || 0,
+          completionTokens: x.completionTokens || 0,
+        };
+      })
       .sort((a, b) => b.credit - a.credit || b.calls - a.calls);
     sendJson(res, 200, {
       ok: true,
@@ -1113,7 +1229,7 @@ const server = createServer((req, res) => {
   }
 
   // 重置耗费统计
-  if (req.method === "POST" && (url === "/cost/reset" || url === "/cost/reset/")) {
+  if (req.method === "POST" && (url === "/cost/reset" || url === "/cost/reset/" || url.startsWith("/cost/reset?"))) {
     costStats = { byModel: {}, since: new Date().toISOString() };
     costDirty = true;
     flushCost();
@@ -1122,28 +1238,65 @@ const server = createServer((req, res) => {
     return;
   }
 
-  if (req.method === "GET" && (url === "/v1/models" || url === "/v1/models/")) {
-    const noteOf = new Map(MODEL_CATALOG.map((m) => [m.id, m.note]));
-    // 优先用名册（官方接口），拿不到再退回探测结果
-    const list = rosterCache && rosterCache.models.length > 0
-      ? rosterCache.models
-      : ACTIVE_MODELS;
-    sendJson(res, 200, {
-      object: "list",
-      source: rosterCache ? "v3/config" : "probe",
-      data: list.map((id) => ({
-        id,
-        object: "model",
-        created: 0,
-        owned_by: "workbuddy",
-        note: noteOf.get(id) || "",
-      })),
+  if (req.method === "GET" && (url === "/v1/models" || url === "/v1/models/" || url.startsWith("/v1/models?"))) {
+    (async () => {
+      const noteOf = new Map(MODEL_CATALOG.map((m) => [m.id, m.note]));
+      // 主动拉名册（有缓存就用缓存，10 分钟过期）
+      //
+      // 2026-11-05 修正：原来只判断 rosterCache 有没有值，
+      // 由于此前没人调过 /v3/models，rosterCache 一直是空的，
+      // 导致 /v1/models 永远退回 ACTIVE_MODELS（探测缓存），source 显示 "probe"。
+      // 现在这里主动拉一次，失败才退回。
+      let roster = null;
+      try {
+        const cred = await resolveCredential().catch(() => null);
+        if (cred) roster = await fetchRoster(cred).catch(() => null);
+      } catch { /* 退回探测结果 */ }
+
+      const list = roster && roster.models.length > 0
+        ? roster.models
+        : ACTIVE_MODELS;
+      const source = roster ? "v3/config" : "probe";
+
+      // 名册里没实测过的模型，成本/延迟未知，这里补上已知的
+      const meta = new Map(MODEL_CATALOG.map((m) => [m.id, m]));
+      sendJson(res, 200, {
+        object: "list",
+        source,
+        count: list.length,
+        data: list.map((id) => {
+          const m = meta.get(id);
+          return {
+            id,
+            object: "model",
+            created: 0,
+            owned_by: "workbuddy",
+            note: m ? m.note : "",
+            cost: m ? m.cost : null,
+            free: m ? m.cost === 0 : null,
+            latencyMs: m ? m.lat : null,
+          };
+        }),
+      });
+    })().catch((e) => {
+      if (!res.headersSent) {
+        // 兜底：直接用探测结果，不让请求失败
+        const noteOf = new Map(MODEL_CATALOG.map((m) => [m.id, m.note]));
+        sendJson(res, 200, {
+          object: "list",
+          source: "probe",
+          data: ACTIVE_MODELS.map((id) => ({
+            id, object: "model", created: 0, owned_by: "workbuddy",
+            note: noteOf.get(id) || "",
+          })),
+        });
+      }
     });
     return;
   }
 
   // 刷新模型：并发探测上游，返回可用的清单并落盘
-  if (req.method === "POST" && (url === "/refresh-models" || url === "/refresh-models/")) {
+  if (req.method === "POST" && (url === "/refresh-models" || url === "/refresh-models/" || url.startsWith("/refresh-models?"))) {
     (async () => {
       const cred = await resolveCredential().catch(() => null);
       if (!cred) {
@@ -1174,7 +1327,7 @@ const server = createServer((req, res) => {
     return;
   }
 
-  if (req.method === "POST" && (url === "/v1/chat/completions" || url === "/v1/chat/completions/")) {
+  if (req.method === "POST" && (url === "/v1/chat/completions" || url === "/v1/chat/completions/" || url.startsWith("/v1/chat/completions?"))) {
     handleChat(req, res).catch((error) => {
       if (!res.headersSent) sendError(res, 500, String(error), "internal");
       else res.end();
@@ -1194,6 +1347,19 @@ process.on("unhandledRejection", (e) => {
 
 server.listen(PORT, HOST, () => {
   console.log("[workbuddy-shim] listening on http://" + HOST + ":" + PORT + "/v1  (region=" + REGION + ")");
+
+  // 启动时预热模型名册，这样 /healthz 的 modelsSource 立刻就是 v3/config
+  // （失败也不影响服务，只是退回 probe）
+  resolveCredential()
+    .then((cred) => fetchRoster(cred))
+    .then((r) => {
+      console.log(
+        "[workbuddy-shim] 启动预热名册完成：" + r.models.length + " 个模型（region=" + REGION + "）"
+      );
+    })
+    .catch((e) => {
+      console.error("[workbuddy-shim] 启动预热名册失败（将退回探测缓存）: " + String(e).slice(0, 120));
+    });
 });
 
 /*
