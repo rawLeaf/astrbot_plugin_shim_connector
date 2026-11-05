@@ -711,6 +711,55 @@ function hasEncryptedCredentialFields(text) {
 let cachedCredential;
 
 /** 在当前区域的所有 auth 文件里找可用凭据。 */
+/** 读对端区的凭据（用于跨区兜底）。 */
+let peerCredCache = null;
+let peerCredAt = 0;
+
+async function resolvePeerCredential() {
+  if (peerCredCache && Date.now() - peerCredAt < 300000) return peerCredCache;
+
+  const home = homedir();
+  const local = process.env.LOCALAPPDATA || join(home, "AppData", "Local");
+  const roaming = process.env.APPDATA || join(home, "AppData", "Roaming");
+  const dirs = [
+    join(local, "CodeBuddyExtension", "Data", "Public", "auth"),
+    join(roaming, "CodeBuddyExtension", "Data", "Public", "auth"),
+  ];
+
+  // 对端区的 live 文件名
+  const peerFile = PEER_REGION === "global"
+    ? "workbuddy-desktop-ai.info"
+    : "workbuddy-desktop.info";
+
+  for (const dir of dirs) {
+    let entries = [];
+    try { entries = readdirSync(dir); } catch { continue; }
+    if (!entries.includes(peerFile)) continue;
+
+    let text;
+    try { text = readFileSync(join(dir, peerFile), "utf8"); } catch { continue; }
+
+    let cred = null;
+    if (!hasEncryptedCredentialFields(text)) {
+      // 明文
+      cred = parseWorkBuddyAuth(text, undefined);
+    } else {
+      // 需要 at-rest 密钥（和本区共用同一个密钥）
+      const key = await readAtRestKey().catch(() => undefined);
+      if (key === undefined) continue;
+      cred = parseWorkBuddyAuth(text, key);
+    }
+    if (cred && cred.accessToken) {
+      cred.domain = PEER_REGION === "global" ? "www.workbuddy.ai" : "copilot.tencent.com";
+      peerCredCache = cred;
+      peerCredAt = Date.now();
+      console.error("[workbuddy-shim] 跨区兜底：已加载 " + PEER_REGION + " 区凭据");
+      return cred;
+    }
+  }
+  return null;
+}
+
 async function resolveCredential() {
   if (cachedCredential) {
     const exp = Number(cachedCredential.expiresAtMs || 0);
@@ -904,6 +953,29 @@ function sendError(res, status, message, code) {
   sendJson(res, status, { error: { message, type: code || "error", code: code || "error" } });
 }
 
+// ── 跨区兜底（额度用尽时自动换区）──────────────────────────
+//
+// 问题：CN 区和 intl 区是**两个独立账号**，额度分开算。
+// 实测 2026-11-05：
+//   CN   glm-5.3-flash → 14018 额度已用尽，但 hy3 还能用
+//   INTL glm-5.3-flash → 正常
+//
+// 所以 CN 区某个模型额度用尽时，可以试试 intl 区的同名模型。
+//
+// 开关：WB_CROSS_REGION=0 关掉（默认开）
+// 触发条件：上游返回 14018（额度用尽）或 1113（余额不足）
+const CROSS_REGION = (process.env.WB_CROSS_REGION ?? "1") !== "0";
+
+/** 跨区映射：本区 → 对端区。 */
+const PEER_REGION = REGION === "global" ? "cn" : "global";
+const PEER_BASE = PEER_REGION === "global" ? "https://www.workbuddy.ai" : "https://copilot.tencent.com";
+
+/** 是否属于「额度/余额问题」——这类才值得跨区重试。 */
+function isQuotaError(text) {
+  return /"code"\s*:\s*(14018|1113|6004|6005)\b/.test(text)
+    || /额度已用尽|余额不足|无可用资源包|credit.*用完/i.test(text);
+}
+
 const LIMIT = 64 * 1024 * 1024;
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -1030,6 +1102,68 @@ async function handleChat(req, res) {
 
   if (!upstream.ok) {
     const t = (await upstream.text()).slice(0, 800);
+
+    // ── 跨区兜底 ──
+    // 额度用尽（14018）或余额不足（1113）时，试试对端区的同一个模型。
+    // CN 和 intl 是两个独立账号，额度分开算，所以这条路常常有效。
+    if (CROSS_REGION && isQuotaError(t)) {
+      console.error(
+        "[workbuddy-shim] " + model + " " + REGION + " 区额度问题，尝试跨区兜底 → " + PEER_REGION
+      );
+      try {
+        const peer = await resolvePeerCredential();
+        if (peer) {
+          const peerHeaders = { ...buildHeaders(peer), "X-Domain": PEER_REGION === "global" ? "www.workbuddy.ai" : "copilot.tencent.com" };
+          const peerRes = await fetch(PEER_BASE + "/v2/chat/completions", {
+            method: "POST",
+            headers: peerHeaders,
+            body: prepared,
+            redirect: "error",
+            signal: AbortSignal.any([controller.signal, AbortSignal.timeout(180000)]),
+          });
+          if (peerRes.ok) {
+            console.error("[workbuddy-shim] " + model + " 跨区兜底成功（" + PEER_REGION + " 区）");
+            // 用对端响应继续走后续流程
+            if (streamDown) {
+              res.writeHead(200, {
+                "Content-Type": "text/event-stream; charset=utf-8",
+                "Cache-Control": "no-cache",
+                Connection: "keep-alive",
+                "X-WB-Region": PEER_REGION,
+                "X-WB-Fallback": "cross-region",
+              });
+              const reader = peerRes.body.getReader();
+              try {
+                while (true) {
+                  const { done, value } = await reader.read();
+                  if (done) break;
+                  res.write(Buffer.from(value));
+                }
+              } catch { /* 客户端断开 */ }
+              res.end();
+              return;
+            }
+            const peerText = await peerRes.text();
+            const peerOut = aggregateSse(peerText, model);
+            if (peerOut && peerOut.usage) {
+              recordCost(model, peerOut.usage.credit, peerOut.usage);
+              flushCost();
+            }
+            res.setHeader("X-WB-Region", PEER_REGION);
+            res.setHeader("X-WB-Fallback", "cross-region");
+            sendJson(res, 200, peerOut);
+            return;
+          }
+          const peerErr = (await peerRes.text()).slice(0, 300);
+          console.error("[workbuddy-shim] 跨区兜底也失败: " + peerErr);
+        } else {
+          console.error("[workbuddy-shim] 跨区兜底跳过：拿不到 " + PEER_REGION + " 区凭据");
+        }
+      } catch (e) {
+        console.error("[workbuddy-shim] 跨区兜底异常: " + String(e).slice(0, 150));
+      }
+    }
+
     recordFail(model);
     flushCost();
     sendError(res, upstream.status === 401 ? 401 : 502, t || ("upstream " + upstream.status), "upstream");
