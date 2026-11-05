@@ -605,7 +605,7 @@ provider = [{
 
 ## 变更日志
 
-当前版本 **1.4.4** —— 完整变更见 [CHANGELOG.md](CHANGELOG.md)。
+当前版本 **1.4.5** —— 完整变更见 [CHANGELOG.md](CHANGELOG.md)。
 
 ---
 

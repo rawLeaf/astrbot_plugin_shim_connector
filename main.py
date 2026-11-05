@@ -1604,6 +1604,7 @@ class ShimConnector(Star):
             ("stop", self._api_stop, ["POST"], "停止指定 shim"),
             ("restart", self._api_restart, ["POST"], "重启指定 shim"),
             ("toggle", self._api_toggle, ["POST"], "切换指定 shim 启停"),
+            ("refresh-models", self._api_refresh_models, ["POST"], "探测上游模型"),
         )
         for endpoint, handler, methods, desc in routes:
             try:
@@ -1825,6 +1826,77 @@ class ShimConnector(Star):
                 return {"ok": True, "message": msg, "running": False}
             msg = await self._do_start(name)
             return {"ok": True, "message": msg, "running": True}
+
+        try:
+            return await self._api_response(await handler())
+        except (ValueError, RuntimeError) as exc:
+            return await self._api_response({"ok": False, "message": str(exc)}, 400)
+
+
+    async def _api_refresh_models(self):
+        """探测上游实际可用的模型（只对 workbuddy 系 shim 有效）。
+
+        上游没有 /v1/models 接口，只能靠候选名并发探测。
+        探测结果由 shim 写入 .wb-models.json，下次启动直接复用。
+
+        请求体（可选）：
+            {"name": "workbuddy"}   —— 指定哪个 shim，默认 workbuddy
+
+        返回：
+            {ok, count, elapsedMs, models: [...], savedTo}
+        """
+
+        async def handler():
+            body = await self._api_body()
+            name = str(body.get("name") or "workbuddy").strip()
+            self._require_name(name)
+
+            spec = self._all_defs()[name]
+            if not spec["script"].startswith("workbuddy-shim"):
+                raise ValueError(
+                    f"{name} 不支持模型探测（只有 workbuddy 系 shim 有该能力）"
+                )
+
+            port = self._port(name)
+            if await port_free_async(port):
+                raise RuntimeError(
+                    f"{name} 未在运行（端口 {port} 空闲），请先启动它再刷新"
+                )
+
+            url = f"http://127.0.0.1:{port}/refresh-models"
+            token = self._token(name)
+            logger.info(f"[shim_connector] {name} 开始探测上游模型...")
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        url,
+                        headers={"Authorization": f"Bearer {token}"},
+                        timeout=aiohttp.ClientTimeout(total=600),
+                    ) as resp:
+                        text = await resp.text()
+                        if resp.status != 200:
+                            raise RuntimeError(
+                                f"探测失败 HTTP{resp.status}: {text[:300]}"
+                            )
+                        data = json.loads(text)
+            except aiohttp.ClientError as exc:
+                raise RuntimeError(f"探测请求失败: {exc}") from exc
+
+            count = data.get("count", 0)
+            logger.info(
+                f"[shim_connector] {name} 探测完成，发现 {count} 个可用模型"
+            )
+            return {
+                "ok": True,
+                "name": name,
+                "count": count,
+                "elapsedMs": data.get("elapsedMs"),
+                "models": data.get("models", []),
+                "savedTo": data.get("savedTo"),
+                "hint": "已写入 shim 缓存，下次启动自动复用。"
+                        "想让 AstrBot 注册新模型：把配置里的 models 留空"
+                        "（= 全部）并重载插件。",
+            }
 
         try:
             return await self._api_response(await handler())

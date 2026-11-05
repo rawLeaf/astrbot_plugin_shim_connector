@@ -7,6 +7,81 @@
 
 ---
 
+## [1.4.5] — 2026-11-05
+
+### 新增：hy4（腾讯混元推理模型）
+
+`workbuddy-shim` 的模型目录新增 `hy4`。
+
+**实测能力**（经 shim 转发）：
+
+| 能力 | 结果 |
+|---|---|
+| 中文对话 | ✅ |
+| 数学推理（23×17） | ✅ 391 |
+| 长文本（200 字） | ✅ 341 字，`finish_reason: stop` |
+| 流式 | ✅ 89 分片 |
+| **工具调用** | ✅ `get_weather({"city":"北京"})` |
+| **图片推理** | ✅ 认出「左红右蓝」，reasoning 里还提到图形轮廓 |
+
+**这是推理模型**，思考过程走 `reasoning_content`：
+
+```
+max_tokens: 100  → reasoning_tokens: 100 → content: ""      ← 空
+max_tokens: 3000 → reasoning_tokens: 377 → content: "我是混元..."  ← 正常
+```
+
+**必须给足 max_tokens**（建议 ≥2048），否则思考会吃光预算导致正文为空。
+
+AstrBot 侧不会误判 —— `openai_source.py` L935-940 判定里
+`has_reasoning_output` 也算「有输出」。
+
+### 新增：刷新模型（并发探测）
+
+**为什么需要**：上游（WorkBuddy / Trae / Qoder）**都没有 `/v1/models` 接口**
+（实测全部 404），模型清单只能靠名字撞。
+
+**实现**：
+
+- shim 侧新增 `POST /refresh-models`
+  - 读 `PROBE_CANDIDATES`（约 40 个候选名，覆盖混元/DeepSeek/通义/智谱/MiniMax/Kimi/字节/小米等）
+  - 并发度 4 探测，每个 30 秒超时
+  - 判断标准：HTTP 200 且响应里无 `error` 字段
+  - 结果写入 `.wb-models.json`（shim 脚本同目录）
+  - 下次启动自动读缓存，不用重探
+- 插件侧新增 `POST /api/plugins/extensions/astrbot_plugin_shim_connector/refresh-models`
+  - 转发到对应 shim 的 `/refresh-models`
+  - 请求体 `{"name":"workbuddy"}`（默认 workbuddy，也支持 workbuddy_intl）
+
+**实测**：38 个候选，10 秒完成，发现 **10 个可用**（比原目录多 4 个）：
+
+```
+space-bunny, hy4, deepseek-v4.1-flash, deepseek-v4-pro,
+minimax-m3.1-flash, glm-5.3-flash,
+deepseek-v3.2, glm-5.3, hy3, minimax-m3     ← 后 4 个是新发现的
+```
+
+新发现的 4 个都实测能正常对话（`1+1` 全返回 `2`）。
+
+### 新增配置
+
+无新增配置项。刷新结果自动落盘，AstrBot 侧把 `models` 留空（= 全部）即可注册新模型。
+
+### 验证
+
+| 检查 | 结果 |
+|---|---|
+| `/v1/models` 含 hy4 | ✅ |
+| hy4 中文/数学/长文本/流式/工具调用 | ✅ |
+| hy4 图片推理 | ✅ |
+| `/refresh-models` 探测 38 个候选 | ✅ 10 秒，10 个可用 |
+| 探测结果落盘 | ✅ `.wb-models.json` |
+| 重启后从缓存加载 | ✅ 日志「使用上次探测结果 10 个模型」 |
+| 新发现模型实测对话 | ✅ 4/4 返回正确 |
+| 部署副本同步 | ✅ |
+
+---
+
 ## [1.4.4] — 2026-11-04
 
 ### 新增：视觉轮换层支持优先级
@@ -662,6 +737,7 @@ Trae 实测真实对话返回正常（`DeepSeek-V4-Flash-Official`）。
 
 | 版本 | commit | 要点 |
 |---|---|---|
+| 1.4.5 | 待定 | 新增 hy4 混元推理模型；可刷新探测上游模型 |
 | 1.4.4 | 待定 | 视觉轮换层支持优先级，默认顺序按实测成功率重排 |
 | 1.4.3 | 待定 | LLM 池支持优先级排序 |
 | 1.4.2 | 待定 | 端口探测异步化；log 目录回退改临时目录 |

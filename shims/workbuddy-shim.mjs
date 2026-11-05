@@ -32,9 +32,10 @@
 import { createServer } from "node:http";
 import { createDecipheriv, createHash, randomUUID } from "node:crypto";
 import { execFile, execFileSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // ── 配置 ───────────────────────────────────────────────────────────
 const PORT = Number(process.env.WB_SHIM_PORT ?? 8787);
@@ -64,6 +65,7 @@ const APP_EXECUTABLE_MISS_TTL_MS = 60000;
  */
 const MODEL_CATALOG = [
   { id: "space-bunny",                 note: "默认，多模态" },
+  { id: "hy4",                         note: "腾讯混元推理模型，支持图片推理；推理过程走 reasoning_content" },
   { id: "deepseek-v4.1-flash",         note: "DeepSeek 快速" },
   { id: "deepseek-v4-pro",             note: "DeepSeek 深度" },
   { id: "minimax-m3.1-flash",          note: "MiniMax 快速" },
@@ -71,6 +73,154 @@ const MODEL_CATALOG = [
   { id: "kimi-k2.6",                   note: "Kimi" },
 ];
 
+/**
+ * 探测候选名 —— 「刷新模型」会逐个试这些 id，能通的才收进清单。
+ *
+ * 上游没有 /v1/models 接口（探测确认 404），所以只能靠名字撞。
+ * 这里的名单是基于各厂商公开模型名 + 实测整理，覆盖常见命名变体。
+ */
+const PROBE_CANDIDATES = [
+  // 腾讯混元
+  "hy4", "hy3", "hunyuan-turbos", "hunyuan-pro", "hunyuan-lite", "hunyuan-t1",
+  // DeepSeek
+  "deepseek-v4.1-flash", "deepseek-v4-pro", "deepseek-v4", "deepseek-v3.2",
+  "deepseek-r2", "deepseek-reasoner", "deepseek-chat",
+  // 通义
+  "qwen3.8-flash", "qwen3.8-max", "qwen3-max", "qwen3-coder",
+  // 智谱
+  "glm-5.3-flash", "glm-5.3", "glm-5", "glm-4.6",
+  // MiniMax
+  "minimax-m3.1-flash", "minimax-m3", "minimax-m2",
+  // Kimi
+  "kimi-k2.6", "kimi-k2", "kimi-k1.5",
+  // 字节
+  "doubao-seed-code", "Doubao-Seed-Code", "doubao-pro",
+  // 小米
+  "mimo-v2.6-flash", "mimo-v2", "mimo",
+  // WorkBuddy 自有
+  "space-bunny",
+  // 其他常见
+  "gpt-5", "gpt-4.1", "claude-sonnet-4.5", "gemini-2.5-pro",
+];
+
+
+// ── 模型探测（「刷新模型」）──────────────────────────────────
+
+/**
+ * 探测结果缓存文件。放在 shim 脚本同目录，下次启动直接读，
+ * 避免每次启动都要重新撞一遍（37 个候选 × 每个 3-30 秒）。
+ */
+const DISCOVERED_FILE = process.env.WB_DISCOVERED_FILE ||
+  join(fileURLToPath(new URL(".", import.meta.url)), ".wb-models.json");
+
+/** 读上次探测结果。 */
+function loadDiscovered() {
+  try {
+    const raw = readFileSync(DISCOVERED_FILE, "utf8");
+    const doc = JSON.parse(raw);
+    if (Array.isArray(doc.models) && doc.models.length > 0) return doc.models;
+  } catch { /* 没有就用默认 */ }
+  return null;
+}
+
+/** 写探测结果。 */
+function saveDiscovered(models) {
+  try {
+    writeFileSync(
+      DISCOVERED_FILE,
+      JSON.stringify({ updatedAt: new Date().toISOString(), models }, null, 2),
+      "utf8",
+    );
+    return true;
+  } catch (e) {
+    console.error("[workbuddy-shim] 写探测结果失败: " + String(e));
+    return false;
+  }
+}
+
+/** 当前生效的模型清单：优先用探测结果，否则用内置目录。 */
+let ACTIVE_MODELS = (() => {
+  const saved = loadDiscovered();
+  if (saved) {
+    console.log("[workbuddy-shim] 使用上次探测结果 " + saved.length + " 个模型");
+    return saved;
+  }
+  return MODEL_CATALOG.map((m) => m.id);
+})();
+
+/**
+ * 用一个最小请求探测某个模型是否可用。
+ *
+ * 判断标准：HTTP 200 且响应里没有 error 字段。
+ * 不校验内容质量（有些模型对 "hi" 会返回空，但仍算可用）。
+ */
+async function probeOne(cred, modelId) {
+  const body = JSON.stringify({
+    model: modelId,
+    messages: [{ role: "user", content: "hi" }],
+    max_tokens: 64,
+    stream: false,
+  });
+  try {
+    const r = await fetch(CHAT_BASE + "/v2/chat/completions", {
+      method: "POST",
+      headers: buildHeaders(cred),
+      body: prepareChatBody(body),
+      redirect: "error",
+      signal: AbortSignal.timeout(30000),
+    });
+    if (!r.ok) {
+      const t = (await r.text()).slice(0, 200);
+      return { ok: false, reason: "HTTP" + r.status + " " + t.replace(/\s+/g, " ").slice(0, 80) };
+    }
+    const t = await r.text();
+    // 上游用 SSE 响应，错误帧里带 error
+    if (/"error"\s*:/.test(t) && !/"delta"\s*:\s*\{[^}]*"content"\s*:\s*"/.test(t)) {
+      return { ok: false, reason: "error frame: " + t.replace(/\s+/g, " ").slice(0, 80) };
+    }
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, reason: "transport: " + String(e).slice(0, 80) };
+  }
+}
+
+/**
+ * 并发探测全部候选，返回可用模型 id 列表。
+ *
+ * 并发度默认 4 —— 太高会被上游限流（429），太低太慢。
+ */
+async function discoverModels(cred, concurrency = 4) {
+  const results = [];
+  const queue = PROBE_CANDIDATES.slice();
+  const queue2 = [];
+  // 已在目录里的先补进候选去重
+  for (const m of MODEL_CATALOG) if (!queue.includes(m.id)) queue.push(m.id);
+
+  let index = 0;
+  async function worker() {
+    while (true) {
+      const i = index++;
+      if (i >= queue.length) return;
+      const id = queue[i];
+      const r = await probeOne(cred, id);
+      if (r.ok) {
+        results.push(id);
+        console.error("[workbuddy-shim] 探测 OK   " + id);
+      } else {
+        console.error("[workbuddy-shim] 探测 FAIL " + id + "  " + r.reason);
+      }
+    }
+  }
+
+  const workers = [];
+  for (let k = 0; k < Math.max(1, concurrency); k += 1) workers.push(worker());
+  await Promise.all(workers);
+
+  // 保持目录顺序在前，新发现的按字母序
+  const known = MODEL_CATALOG.map((m) => m.id).filter((id) => results.includes(id));
+  const extra = results.filter((id) => !known.includes(id)).sort();
+  return known.concat(extra);
+}
 
 // ── at-rest 解密（改写自 at-rest.ts，MIT）───────────────────────────
 
@@ -699,15 +849,48 @@ const server = createServer((req, res) => {
   }
 
   if (req.method === "GET" && (url === "/v1/models" || url === "/v1/models/")) {
+    const noteOf = new Map(MODEL_CATALOG.map((m) => [m.id, m.note]));
     sendJson(res, 200, {
       object: "list",
-      data: MODEL_CATALOG.map((m) => ({
-        id: m.id,
+      data: ACTIVE_MODELS.map((id) => ({
+        id,
         object: "model",
         created: 0,
         owned_by: "workbuddy",
-        note: m.note,
+        note: noteOf.get(id) || "探测发现",
       })),
+    });
+    return;
+  }
+
+  // 刷新模型：并发探测上游，返回可用的清单并落盘
+  if (req.method === "POST" && (url === "/refresh-models" || url === "/refresh-models/")) {
+    (async () => {
+      const cred = await resolveCredential().catch(() => null);
+      if (!cred) {
+        sendError(res, 500, "无法加载凭据，刷新失败", "no_credential");
+        return;
+      }
+      console.error("[workbuddy-shim] 开始探测模型（" + PROBE_CANDIDATES.length + " 个候选）...");
+      const t0 = Date.now();
+      const found = await discoverModels(cred, 4);
+      const ms = Date.now() - t0;
+      if (found.length === 0) {
+        sendError(res, 502, "探测完成但没有任何模型可用", "empty");
+        return;
+      }
+      ACTIVE_MODELS = found;
+      saveDiscovered(found);
+      console.error("[workbuddy-shim] 探测完成 " + found.length + " 个，用时 " + ms + "ms");
+      sendJson(res, 200, {
+        ok: true,
+        count: found.length,
+        elapsedMs: ms,
+        models: found,
+        savedTo: DISCOVERED_FILE,
+      });
+    })().catch((e) => {
+      if (!res.headersSent) sendError(res, 500, String(e), "internal");
     });
     return;
   }

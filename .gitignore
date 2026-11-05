@@ -7,3 +7,4 @@ trae-auth.json
 .trae-auth*.json
 auth.v1.dat
 .env
+shims/.wb-models.json
