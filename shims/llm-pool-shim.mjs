@@ -323,6 +323,7 @@ async function handleChat(req, res) {
       if (AUTO_TUNE) {
         t.score = clampScore(t.score + RECOVER_STEP);
         saveHealth(Object.fromEntries(targets.map((x) => [x.id, x.score])));
+        console.error("[llm-pool] " + t.id + " 健康分 +" + RECOVER_STEP + " → " + t.score);
       }
       if (STRATEGY === "roundrobin") {
         cursor = (targets.indexOf(t) + 1) % n;

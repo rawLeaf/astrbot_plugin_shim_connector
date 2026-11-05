@@ -63,14 +63,35 @@ const APP_EXECUTABLE_MISS_TTL_MS = 60000;
  * 所以这里静态列出；调用 /v1/models 时返回它们，
  * 好让下游（如 AstrBot 插件）能自动注册 provider。
  */
+/**
+ * 模型目录 —— 按「速度优先、成本其次」排序（2026-11-05 实测）。
+ *
+ * 测法：固定 prompt「1+1=?」，max_tokens 1000，各跑 3 次取中位数。
+ * credit 是该次调用的实际扣费（上游 usage.credit 字段）。
+ *
+ * | 模型                | 延迟   | credit | 说明 |
+ * |---------------------|--------|--------|------|
+ * | kimi-k2.6           | 1416ms | 0      | 最快，免费 |
+ * | deepseek-v4.1-flash | 2004ms | 0      | 免费 |
+ * | glm-5.3-flash       | 2081ms | 0.01   | 极便宜 |
+ * | space-bunny         | 2212ms | 0      | 多模态，免费 |
+ * | hy3                 | 2244ms | 0      | 混元，免费，带推理 |
+ * | minimax-m3.1-flash  | 2426ms | 0      | 免费 |
+ * | hy4                 | 3718ms | 0.02   | 混元推理，**按量计费** |
+ * | deepseek-v4-pro     | 4496ms | 0.01   | 深度推理，慢 |
+ *
+ * 注意 hy4 是唯一明显要钱的：大输出时 credit 会涨（实测 1463 token → 0.42）。
+ * hy3 测了 3000 token 输出仍是 0，确认免费。
+ */
 const MODEL_CATALOG = [
-  { id: "space-bunny",                 note: "默认，多模态" },
-  { id: "hy4",                         note: "腾讯混元推理模型，支持图片推理；推理过程走 reasoning_content" },
-  { id: "deepseek-v4.1-flash",         note: "DeepSeek 快速" },
-  { id: "deepseek-v4-pro",             note: "DeepSeek 深度" },
-  { id: "minimax-m3.1-flash",          note: "MiniMax 快速" },
-  { id: "glm-5.3-flash",               note: "智谱快速" },
-  { id: "kimi-k2.6",                   note: "Kimi" },
+  { id: "kimi-k2.6",                   note: "最快（1.4s），免费" },
+  { id: "deepseek-v4.1-flash",         note: "快（2.0s），免费" },
+  { id: "glm-5.3-flash",               note: "快（2.1s），极便宜（0.01）" },
+  { id: "space-bunny",                 note: "多模态（2.2s），免费" },
+  { id: "hy3",                         note: "腾讯混元（2.2s），免费，带 reasoning_content" },
+  { id: "minimax-m3.1-flash",          note: "（2.4s），免费" },
+  { id: "hy4",                         note: "混元推理（3.7s），支持图片；**按量计费**（约 0.02/次）" },
+  { id: "deepseek-v4-pro",             note: "深度推理（4.5s），便宜但慢" },
 ];
 
 /**
