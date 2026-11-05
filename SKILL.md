@@ -9,7 +9,7 @@ description: 白嫖机器人：把已付费的 WorkBuddy / Trae / Qoder 订阅�
 连同视觉轮换层和 LLM 池，通过 loopback shim 变成 AstrBot 可用的模型源。
 
 **仓库**：https://github.com/rawLeaf/astrbot_plugin_shim_connector
-**当前版本**：v1.4.7（2026-11-05）
+**当前版本**：v1.4.8（2026-11-05）
 
 ---
 
@@ -118,7 +118,7 @@ AstrBot → provider(<source_id>/<model>)
 
 **留空 = 全部注册。**
 
-| shim | 可选模型 |
+| shim | 内置默认模型（可用「刷新模型」探测更多） |
 |---|---|
 | WorkBuddy | `space-bunny` / `deepseek-v4.1-flash` / `deepseek-v4-pro` / `minimax-m3.1-flash` / `glm-5.3-flash` / `kimi-k2.6` |
 | Trae | `DeepSeek-V4-Flash-Official` / `glm-5.3-flash` / `Doubao-Seed-Code` / `mimo-v2.6-flash` / `minimax-m3.1-flash` / `qwen3.8-flash` |

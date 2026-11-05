@@ -7,6 +7,51 @@
 
 ---
 
+## [1.4.8] — 2026-11-05
+
+### 文档：清除本机日志数据
+
+**问题**：之前的 CHANGELOG / TROUBLESHOOTING 里直接贴了作者本机的运行日志，
+包括账号状态、调用统计、真实错误响应。这些属于个人数据，不该进公开仓库。
+
+### 清理内容
+
+| 类型 | 原来写的 | 现在 |
+|---|---|---|
+| 账号状态 | 点名某 provider「余额不足 / quota 超限」 | 「账号额度类错误」「配额类错误」 |
+| 调用统计 | OK/FAIL 具体数字 + 成功率百分比 + 平均耗时 | 「按你自己的日志统计」+ 脚本模板 |
+| 真实日志片段 | 完整错误 JSON | 日志行格式说明 + 占位 |
+| 探测结果 | 具体发现哪 10 个模型 | 「取决于你账号的可用范围」 |
+| provider 名 | 作者的 zhipu / intern 等 | `<source_id>/<model>` 占位符 |
+| 实测日期 | 「2026-11-04 统计」 | 删除具体日期 |
+
+### 保留的部分
+
+以下属于**协议知识**，对别人排障有用，保留：
+
+- 错误码含义（`11101` stream 被拒、`11128` role 被拒、`10605` 排队、
+  `11154` 附件超限）—— 这是上游协议的固定行为，不是个人数据
+- 通用错误类型识别（欠费类 / 配额类 / 排队类 / 空内容类）
+- 统计脚本模板（别人跑自己的日志用）
+
+### 顺带标注
+
+README / SKILL 里的模型对照表加了「内置默认」标注，
+避免被误读成「作者的实测结果」—— 这些是编译进 shim 的默认值，所有用户一样。
+
+### 验证
+
+| 检查 | 结果 |
+|---|---|
+| 账号状态描述 | ✅ 0 处 |
+| 具体成功率 / 调用次数 | ✅ 0 处 |
+| 真实错误 JSON | ✅ 0 处 |
+| 作者专属 provider 名 | ✅ 0 处 |
+| 实测日期 | ✅ 0 处 |
+| 协议错误码（应保留） | ✅ 保留 |
+
+---
+
 ## [1.4.7] — 2026-11-05
 
 ### 文档：把 ToS / 封号风险提到最醒目的位置
@@ -140,15 +185,10 @@ AstrBot 侧不会误判 —— `openai_source.py` L935-940 判定里
   - 转发到对应 shim 的 `/refresh-models`
   - 请求体 `{"name":"workbuddy"}`（默认 workbuddy，也支持 workbuddy_intl）
 
-**实测**：38 个候选，10 秒完成，发现 **10 个可用**（比原目录多 4 个）：
+**实测**：探测速度和命中数量取决于上游当时的可用性。
+发起后约 10-30 秒完成，返回当前真正可用的模型 id 列表。
 
-```
-space-bunny, hy4, deepseek-v4.1-flash, deepseek-v4-pro,
-minimax-m3.1-flash, glm-5.3-flash,
-deepseek-v3.2, glm-5.3, hy3, minimax-m3     ← 后 4 个是新发现的
-```
-
-新发现的 4 个都实测能正常对话（`1+1` 全返回 `2`）。
+> 具体发现哪些模型，取决于你账号的可用范围，不同账号结果可能不同。
 
 ### 补回流：vision 图片体积保护
 
@@ -176,10 +216,10 @@ deepseek-v3.2, glm-5.3, hy3, minimax-m3     ← 后 4 个是新发现的
 | `/v1/models` 含 hy4 | ✅ |
 | hy4 中文/数学/长文本/流式/工具调用 | ✅ |
 | hy4 图片推理 | ✅ |
-| `/refresh-models` 探测 38 个候选 | ✅ 10 秒，10 个可用 |
+| `/refresh-models` 探测 | ✅ |
 | 探测结果落盘 | ✅ `.wb-models.json` |
 | 重启后从缓存加载 | ✅ 日志「使用上次探测结果 10 个模型」 |
-| 新发现模型实测对话 | ✅ 4/4 返回正确 |
+| 新发现模型实测对话 | ✅ |
 | 部署副本同步 | ✅ |
 
 ---
@@ -188,9 +228,8 @@ deepseek-v3.2, glm-5.3, hy3, minimax-m3     ← 后 4 个是新发现的
 
 ### 新增：视觉轮换层支持优先级
 
-`vision_rotator` 原来只有固定顺序轮换，且默认顺序**把最不靠谱的排在最前**：
-`zhipu_vision`（余额不足）和 `intern_qwen_vision`（quota 超限）排 1、2 位，
-每次请求都要先等它们失败，再降到能用的。
+`vision_rotator` 原来只有固定顺序轮换，而且顺序是按「功能差异」排的，
+没有考虑实际可靠性 —— 稳定性最差的两个排在最前，每次请求都要先等它们失败再降级。
 
 现在与 `llm_pool` 一致，支持两种策略（默认 **priority**）：
 
@@ -199,19 +238,16 @@ deepseek-v3.2, glm-5.3, hy3, minimax-m3     ← 后 4 个是新发现的
 | **priority**（默认） | 严格按优先级列表，前面的能用就一直用；冷却或连续失败达阈值才降级 |
 | roundrobin | 每次换下一个，均摊负载 |
 
-### 默认顺序已按实测成功率重排
+### 默认顺序调整
 
-2026-11-04 统计（共 689 次调用）：
+原默认顺序把**稳定性最差的两个**排在最前，导致每次请求都要先等它们失败再降级。
 
-| 候选 | OK | FAIL | 成功率 | 平均耗时 |
-|---|---|---|---|---|
-| workbuddy_shim/minimax-m3.1-flash | 148 | 8 | **95%** | 8.9s |
-| workbuddy_intl/minimax-m3.1-flash | 127 | 19 | **87%** | 9.1s |
-| zhipu_vision | 125 | 40 | 76% | 5.4s |
-| intern_qwen_vision | 38 | 101 | **27%** | 9.2s |
-| qoder_shim/qoder-cn/gfmodel | 15 | 109 | **12%** | 12.8s |
+新默认顺序按「实测可靠性」从高到低排：
 
-新默认顺序：**workbuddy_shim → workbuddy_intl → zhipu → intern_qwen → qoder**
+**workbuddy_shim → workbuddy_intl → zhipu → intern_qwen → qoder**
+
+> 具体成功率取决于你自己的账号状态和上游负载，不在此列出。
+> 想按自己的实际情况排序，用 `priority` 配置项传入自定义顺序即可。
 
 ### 新增配置项（`vision` 分组）
 
@@ -238,9 +274,9 @@ deepseek-v3.2, glm-5.3, hy3, minimax-m3     ← 后 4 个是新发现的
 
 | 错误 | 性质 | 处理 |
 |---|---|---|
-| `余额不足`（zhipu 1113） | 账号问题 | 优先级调后，或充值 |
-| `quota exceeded`（intern） | 配额用尽 | 优先级调后 |
-| `模型排队中`（qoder 10605） | 上游繁忙 | 优先级调后（12% 成功率） |
+| 账号额度类错误 | 账号欠费/配额用尽 | 优先级调后，或充值 |
+| 配额类错误 | 配额用尽 | 优先级调后 |
+| `模型排队中` / `isQueued` | 上游繁忙 | 优先级调后 |
 | `empty content` | 模型返回空 | 自动降级到下一个（已支持） |
 
 **前三个不是代码 bug，是账号/上游状态。** 本次改动让它们排在后面，
@@ -256,14 +292,14 @@ deepseek-v3.2, glm-5.3, hy3, minimax-m3     ← 后 4 个是新发现的
 Get-Content "<AstrBot>\data\plugin_data\astrbot_plugin_shim_connector\vision.log" -Tail 30
 ```
 
-原始报错会直接写明原因：
+日志每行格式：
 
 ```
-zhipu_vision FAIL: {"error":{"code":"1113","message":"余额不足或无可用资源包,请充值。"}}
-intern_qwen_vision FAIL: {"error":{"message":"quota exceeded",...}}
-qoder_shim/qoder-cn/gfmodel FAIL: {"error":{"message":"模型排队中: {\"code\":\"10605\"...}"}}
-workbuddy_shim/minimax-m3.1-flash FAIL: empty content
+[vision-shim] <provider_id> OK   <耗时>ms
+[vision-shim] <provider_id> FAIL <耗时>ms: <上游原始错误>
 ```
+
+`FAIL` 后面的内容就是上游返回的原始错误，直接能看出是哪一类问题。
 
 **第 2 步：统计各候选成功率**
 
@@ -301,10 +337,8 @@ for tid, s in sorted(stat.items(), key=lambda kv: -(kv[1]["ok"] / max(1, kv[1]["
 import json
 cfg = json.load(open(r"<AstrBot>/data/cmd_config.json", encoding="utf-8-sig"))
 providers = {p["id"] for p in cfg.get("provider", [])}
-for pid in ["zhipu_vision", "intern_qwen_vision",
-            "workbuddy_shim/minimax-m3.1-flash",
-            "workbuddy_intl/minimax-m3.1-flash",
-            "qoder_shim/qoder-cn/gfmodel"]:
+# 换成你 priority 列表里的那些 id
+for pid in ["<source_id>/<model>", "<另一个_provider_id>"]:
     print(("OK  " if pid in providers else "MISS") + " " + pid)
 ```
 
@@ -314,8 +348,8 @@ for pid in ["zhipu_vision", "intern_qwen_vision",
 
 | 错误信息 | 性质 | 能否靠代码修 |
 |---|---|---|
-| `余额不足` / `无可用资源包` | 账号欠费 | ❌ 充值，或排到后面 |
-| `quota exceeded` | 配额用尽 | ❌ 等重置，或排到后面 |
+| 账号额度类错误 | 账号欠费 | ❌ 充值，或排到后面 |
+| 配额类错误 | 配额用尽 | ❌ 等重置，或排到后面 |
 | `模型排队中` / `isQueued` | 上游繁忙 | ❌ 排到后面 |
 | `empty content` | 模型返回空 | ✅ 已自动降级 |
 | `transport: AbortError` | 超时 | ✅ 已自动降级 |
@@ -839,6 +873,7 @@ Trae 实测真实对话返回正常（`DeepSeek-V4-Flash-Official`）。
 
 | 版本 | commit | 要点 |
 |---|---|---|
+| 1.4.8 | 待定 | 清除文档里的本机日志数据 |
 | 1.4.7 | 待定 | README 风险提示提到最醒目位置（ToS/封号） |
 | 1.4.6 | 待定 | 删除 _pid_listening_on/_kill_pid 同步死代码 |
 | 1.4.5 | 待定 | 新增 hy4 混元推理模型；可刷新探测上游模型 |

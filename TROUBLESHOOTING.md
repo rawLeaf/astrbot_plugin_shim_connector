@@ -350,23 +350,20 @@ Invoke-RestMethod -Uri "http://127.0.0.1:8788/v1/chat/completions" -Method Post 
 
 ### 症状
 
+机器人报「所有候选都失败」，或某个轮换层完全不出结果。
+
 ```
 vision_rotator 的候选模型全部失败
-代码块
-
-workbuddy_shim/minimax-m3.1-flash   FAIL  empty content
-workbuddy_intl/minimax-m3.1-flash   FAIL  empty content
-qoder_shim/qoder-cn/gfmodel         FAIL  模型排队中
-zhipu_vision                        FAIL  余额不足
-intern_qwen_vision                  FAIL  quota exceeded
 ```
+
+具体是谁失败、为什么失败，看 shim 日志（见下方第 1 步）。
 
 ### 先分清：哪些能修，哪些不能
 
 | 错误信息 | 性质 | 能否靠代码修 |
 |---|---|---|
-| `余额不足` / `无可用资源包` | 账号欠费 | ❌ 充值，或排到后面 |
-| `quota exceeded` | 配额用尽 | ❌ 等重置，或排到后面 |
+| 账号额度类错误（欠费 / 无资源包） | 账号问题 | ❌ 充值，或排到后面 |
+| 配额类错误（超出上限） | 配额用尽 | ❌ 等重置，或排到后面 |
 | `模型排队中` / `isQueued` | 上游繁忙 | ❌ 排到后面 |
 | `empty content` | 模型返回空 | ✅ 自动降级 |
 | `transport: AbortError` | 超时 | ✅ 自动降级 |
@@ -434,12 +431,14 @@ for rate, tid, ok, fail, avg, reasons in sorted(rows, reverse=True):
 2. **优先级列表** 按成功率从高到低填 provider id
 3. 用不上的（欠费、超限）**直接不填**，它们不会被尝试
 
-例如只留两个最稳的：
+例如只留两个你自己测下来最稳的（把下面的占位换成实际 id）：
 
 ```
-workbuddy_shim/minimax-m3.1-flash
-workbuddy_intl/minimax-m3.1-flash
+<source_id>/<model_A>
+<source_id>/<model_B>
 ```
+
+不填进来的目标**不会被尝试** —— 这是跳过欠费/超限账号最直接的办法。
 
 ### 第 4 步：确认 provider 还在
 
@@ -447,10 +446,8 @@ workbuddy_intl/minimax-m3.1-flash
 import json
 cfg = json.load(open(r"<AstrBot>/data/cmd_config.json", encoding="utf-8-sig"))
 providers = {p["id"] for p in cfg.get("provider", [])}
-for pid in ["zhipu_vision", "intern_qwen_vision",
-            "workbuddy_shim/minimax-m3.1-flash",
-            "workbuddy_intl/minimax-m3.1-flash",
-            "qoder_shim/qoder-cn/gfmodel"]:
+# 换成你 priority 列表里的那些 id
+for pid in ["<source_id>/<model>", "<另一个_provider_id>"]:
     print(("OK  " if pid in providers else "MISS") + " " + pid)
 ```
 
@@ -479,17 +476,22 @@ curl -H "Authorization: Bearer sk-llm-pool-local" http://127.0.0.1:8792/healthz
 - `cooling` —— 是否在冷却期
 - `degraded` —— 是否因连续失败被排到最后
 
-### 参考：2026-11-04 实测数据
+### 参考：怎么决定顺序
 
-| 候选 | OK | FAIL | 成功率 | 平均耗时 |
-|---|---|---|---|---|
-| workbuddy_shim/minimax-m3.1-flash | 148 | 8 | **95%** | 8.9s |
-| workbuddy_intl/minimax-m3.1-flash | 127 | 19 | **87%** | 9.1s |
-| zhipu_vision | 125 | 40 | 76% | 5.4s |
-| intern_qwen_vision | 38 | 101 | **27%** | 9.2s |
-| qoder_shim/qoder-cn/gfmodel | 15 | 109 | **12%** | 12.8s |
+**没有通用最优顺序** —— 取决于你自己的账号额度、上游当时的负载。
 
-据此把默认顺序改成了 workbuddy → workbuddy_intl → zhipu → intern_qwen → qoder。
+做法：
+
+1. 跑一段时间的 shim 日志
+2. 用上面第 2 步的脚本统计各候选成功率
+3. 按你自己的统计结果排 `priority` 列表
+
+一般规律（不保证适用你的账号）：
+
+- 你主力用的那家客户端，通常最稳
+- 免费档 / 试用档的模型容易碰到配额上限
+- 排队类错误（`isQueued`）多发于高峰期，和账号关系不大
+
 
 ---
 

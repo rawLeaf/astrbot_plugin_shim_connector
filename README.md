@@ -318,7 +318,7 @@ mymodel|my-shim.mjs|9000|sk-my-local
 
 ### 各 shim 的可选模型
 
-**WorkBuddy**（6 个）
+**WorkBuddy**（内置默认 6 个，可用「刷新模型」探测更多）
 
 ```
 space-bunny            （默认，多模态）
@@ -329,10 +329,10 @@ glm-5.3-flash
 kimi-k2.6
 ```
 
-**Trae**（6 个）
+**Trae**（内置默认 6 个）
 
 ```
-DeepSeek-V4-Flash-Official   （最稳）
+DeepSeek-V4-Flash-Official
 glm-5.3-flash
 Doubao-Seed-Code
 mimo-v2.6-flash
@@ -693,7 +693,7 @@ WorkBuddy（腾讯 CodeBuddy） / Trae（字节） / Qoder（阿里）的服务�
 ---
 ## 变更日志
 
-当前版本 **1.4.7** —— 完整变更见 [CHANGELOG.md](CHANGELOG.md)。
+当前版本 **1.4.8** —— 完整变更见 [CHANGELOG.md](CHANGELOG.md)。
 
 ---
 
