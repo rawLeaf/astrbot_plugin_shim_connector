@@ -1,3 +1,6 @@
+/* 强制隐藏 —— display:flex 之类的规则会覆盖 hidden 属性的默认 display:none */
+[hidden] { display: none !important; }
+
 :root {
   --bg: #0f1115;
   --panel: #171a21;
@@ -161,12 +164,7 @@ body {
   padding: 22px; width: min(420px, 92vw);
 }
 .modal-box h3 { margin: 0 0 8px; font-size: 16px; }
-.qr-wrap {
-  display: flex; align-items: center; justify-content: center;
-  min-height: 200px; background: #fff; border-radius: 10px; margin: 14px 0; padding: 12px;
-}
-.qr-wrap img { max-width: 100%; image-rendering: pixelated; }
-.qr-placeholder { color: #666; font-size: 13px; }
+.qr-placeholder { color: var(--dim); font-size: 12.5px; text-align: center; }
 .link-row { display: flex; gap: 8px; margin-bottom: 10px; }
 .link-row input {
   flex: 1; background: var(--panel-2); border: 1px solid var(--border);
@@ -362,3 +360,33 @@ body {
 .qregion-btn.active {
   background: var(--accent); border-color: var(--accent); color: #fff;
 }
+
+
+/* 授权页按钮 */
+.auth-actions {
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  padding: 20px 0;
+  background: var(--panel-2);
+  border-radius: var(--radius);
+  margin: 14px 0;
+}
+.btn.big {
+  padding: 11px 22px;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+
+/* 适用范围提示 */
+.scope-note {
+  background: #14203a;
+  border: 1px solid #1f3560;
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  font-size: 12.5px;
+  line-height: 1.75;
+  color: #a9c4f0;
+}
+.scope-note strong { color: #cfe0ff; }

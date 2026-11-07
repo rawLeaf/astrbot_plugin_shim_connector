@@ -416,6 +416,29 @@ function writeVaultFile(region, account) {
   const d = ensureVaultDir(region);
   const accountId = account.accountId;
   if (!accountId) throw new Error("accountId 不能为空");
+
+  // 按 uid 去重：如果已有同 uid 但不同 accountId 的文件，先删掉。
+  //
+  // 起因（2026-11-07）：扫码登录生成的 accountId 是 uid 前 24 位，
+  // 而从 dsh 导入的 accountId 是 dsh 自己的 hash，两者不同。
+  // 结果同一个账号在 vault 里出现两份（155****9291 出现了两次）。
+  const uid = String(account.uid || "").trim();
+  if (uid !== "") {
+    for (const old of listVaultFiles(region)) {
+      if (old.accountId === accountId) continue;
+      const prev = readVaultFile(old.path);
+      if (prev && String(prev.uid || "").trim() === uid) {
+        try {
+          unlinkSync(old.path);
+          console.error(
+            "[workbuddy-shim] 去重：删除同 uid 的旧账号文件 " +
+            old.accountId + "（uid=" + uid.slice(0, 12) + "）"
+          );
+        } catch { /* 删不掉就算了 */ }
+      }
+    }
+  }
+
   const target = join(d, accountId + ".json");
   const tmp = target + ".tmp." + process.pid;
 

@@ -7,6 +7,142 @@
 
 ---
 
+## [1.6.1] — 2026-11-07
+
+### 安全：移除第三方二维码生成
+
+**之前**：扫码登录用 `某第三方二维码服务` 生成二维码图片：
+
+```javascript
+q("#qrImage").src = "https://某第三方二维码服务/v1/create-qr-code/?size=200x200&data="
+  + encodeURIComponent(r.verificationUri);
+```
+
+**等于把带 state 的登录 URL 发给第三方服务去画图。**
+虽然 state 一次性且 10 分钟过期，但完全没必要外传。
+
+**现在**：改成「打开官方授权页」按钮，浏览器直达：
+
+```javascript
+if (r.verificationUri) window.open(r.verificationUri, "_blank", "noopener");
+```
+
+token 由官方轮询返回本机，全程不经过任何第三方。
+
+**链路实测验证**（2026-11-07）：
+
+| 阶段 | 上游返回 | 处理 |
+|---|---|---|
+| 未扫码 | `{"code": 11217, "msg": "login ing..."}` | 继续轮询 |
+| 已扫码 | `{"code": 0, "data": {"accessToken": ...}}` | 提取 token |
+| 补资料 | `/login/account` → uid/nickname/uin | 写 vault |
+
+用户扫码后实测拿到完整账号：
+```json
+{"done": true, "account": {"uid": "...", "nickname": "<某账号>", "uin": "..."}}
+```
+
+### 修复：vault 里同一账号存了两份
+
+**现象**：`<某账号>` 在 vault 里出现两次，过期时间不同。
+
+**根因**：accountId 有两套生成规则：
+
+| 来源 | accountId |
+|---|---|
+| 扫码登录 | `uid.replace(/-/g,"").slice(0,24)` → `<newAccountId>` |
+| 从 dsh 导入 | dsh 自己的 hash → `<dshAccountId>` |
+
+同一个 uid 生成了两个文件名。
+
+**修法**：`writeVaultFile` 写之前按 **uid** 查重，删掉同 uid 的旧文件：
+
+```javascript
+if (uid !== "") {
+  for (const old of listVaultFiles(region)) {
+    if (old.accountId === accountId) continue;
+    const prev = readVaultFile(old.path);
+    if (prev && prev.uid === uid) unlinkSync(old.path);
+  }
+}
+```
+
+已清理现有重复（保留过期时间最晚的那份）。
+
+### 修复：qoder 模型名看不懂
+
+**之前**：直接显示上游代号
+```
+Qoder 国内 · qfmodel
+Qoder 国内 · dfmodel
+```
+
+**问题**：后端 `/v3/models` 早就返回了 `display` 字段，前端没用：
+
+```json
+{"id": "qoder-cn/qfmodel", "display": "Qwen3.8-Flash"}
+```
+
+**修法**：`prettyModelName(id, display)` 优先用 display，并按区域加前缀：
+
+| 之前 | 现在 |
+|---|---|
+| ~~Qoder 国内 · qfmodel~~ | **国内 · Qwen3.8-Flash** |
+| ~~Qoder 国内 · dfmodel~~ | **国内 · DeepSeek-Flash** |
+| ~~Qoder 国内 · gfmodel~~ | **国内 · GLM-5.3-Flash** |
+| ~~Qoder 国内 · mmodel~~ | **国内 · MiniMax-M3.1-Flash** |
+| ~~Qoder 国际 · ultimate~~ | **国际 · Ultimate** |
+
+兜底：后端没给 display 时查代号别名表（qfmodel→Qwen3.8-Flash 等）。
+
+### 修复：CSS 优先级导致 hidden 失效
+
+```css
+.qregion-bar { display: flex; }   /* 类选择器覆盖了 [hidden] 的默认 display:none */
+```
+
+结果「Qoder 区域」按钮在所有 shim 下都显示，不只是 Qoder。
+
+修法：加全局规则
+```css
+[hidden] { display: none !important; }
+```
+
+同时影响并修复了 `.modal[hidden]`（原本有专门补救，没暴露）。
+
+### 改进：明确「只有 WorkBuddy 支持多账号」
+
+**按钮文字**：`扫码添加` → `WorkBuddy 扫码添加`
+
+**账号池顶部加说明框**：
+> 适用范围：账号池、扫码登录、余额查询**只对 WorkBuddy 有效**。
+> Trae / Qoder / 视觉轮换 / LLM 池 用的是各自客户端里登录的那一个账号，不支持多账号。
+
+后端本来就是硬编码 `workbuddy`，传别的 shim 名也调不到。
+
+### 简化：扫码弹窗去掉冗余元素
+
+用户反馈「是不是多余了一个就行了」。
+
+改前：官方按钮 + 链接输入框 + 复制按钮
+改后：**只有官方按钮**（它打开的就是那个链接）
+
+优化效果：少 2 个交互元素，少 4 处 JS 引用。
+
+### 验证
+
+| 检查 | 结果 |
+|---|---|
+| 扫码登录完整链路 | ✅ 用户实扫，拿到 token |
+| 未扫码返回 11217 | ✅ 正确继续轮询 |
+| vault uid 去重 | ✅ 只剩 5 个账号 |
+| qoder 显示真实名称 | ✅ 25/25 有 display |
+| [hidden] 生效 | ✅ 7 个元素初始状态正确 |
+| 无第三方域名 | ✅ 已清除 |
+| 语法 | ✅ 全过 |
+
+---
+
 ## [1.6.0] — 2026-11-07
 
 ### 新增：多账号池 + 扫码登录 + 余额查询
@@ -1548,6 +1684,7 @@ Trae 实测真实对话返回正常（`DeepSeek-V4-Flash-Official`）。
 
 | 版本 | commit | 要点 |
 |---|---|---|
+| 1.6.1 | 待定 | 移除第三方二维码、vault uid 去重、qoder 真实名称、hidden 修复 |
 | 1.6.0 | 待定 | 多账号池 + 扫码登录 + 余额 + WebUI 页面 + 5 shim 耗费统计 |
 | 1.5.4 | 待定 | 跨区兜底：额度用尽自动切到另一个区 |
 | 1.5.3 | 待定 | 修 8 个路由的 query bug；成本按实测；模型管理接口 |

@@ -32,9 +32,15 @@
             <span>自动调序</span>
           </label>
           <button class="btn" id="scanVaults" type="button">检测本地账号</button>
-          <button class="btn primary" id="addAccount" type="button">扫码添加</button>
+          <button class="btn primary" id="addAccount" type="button" title="仅 WorkBuddy / CodeBuddy 支持扫码登录">WorkBuddy 扫码添加</button>
         </div>
       </div>
+      <div class="scope-note">
+        <strong>适用范围</strong>：账号池、扫码登录、余额查询<strong>只对 WorkBuddy 有效</strong>。
+        <br />
+        Trae / Qoder / 视觉轮换 / LLM 池 用的是各自客户端里登录的那一个账号，不支持多账号。
+      </div>
+
       <details class="explain-box" open>
         <summary>「自动调序」是什么？</summary>
         <div class="explain-body">
@@ -177,20 +183,22 @@
     </div>
   </div>
 
-  <!-- 扫码弹窗 -->
+  <!-- 扫码登录弹窗（仅 WorkBuddy）-->
   <div class="modal" id="loginModal" hidden>
     <div class="modal-box">
-      <h3>扫码添加账号</h3>
-      <p class="hint">用手机 WorkBuddy / CodeBuddy 扫码，或打开下面的链接确认。</p>
-      <div class="qr-wrap">
-        <img id="qrImage" alt="二维码" hidden />
-        <div class="qr-placeholder" id="qrPlaceholder">正在生成…</div>
+      <h3>WorkBuddy 扫码登录</h3>
+      <p class="hint">
+        点下面的按钮会打开 <strong>WorkBuddy 官方授权页</strong>，在那边扫码或确认登录。
+        <br />
+        <span style="color:var(--dim)">token 由官方直接返回本机，不经过任何第三方。</span>
+      </p>
+      <div class="auth-actions">
+        <button class="btn primary big" id="openAuthPage" type="button" hidden>
+          打开 WorkBuddy 授权页
+        </button>
+        <div class="qr-placeholder" id="qrPlaceholder">正在向官方申请登录地址…</div>
       </div>
-      <div class="link-row">
-        <input type="text" id="loginUrl" readonly />
-        <button class="btn" id="copyUrl" type="button">复制</button>
-      </div>
-      <div class="login-status" id="loginStatus">等待扫码…</div>
+      <div class="login-status" id="loginStatus">等待登录…</div>
       <div class="modal-actions">
         <button class="btn ghost" id="closeLogin" type="button">关闭</button>
       </div>

@@ -102,13 +102,44 @@ function fmtCost(cost, free) {
  * deepseek-v4.1-flash   -> DeepSeek V4.1 Flash
  * hy4free               -> 混元 HY4 Free
  */
-function prettyModelName(id) {
+function prettyModelName(id, display) {
   if (!id) return "";
   const s = String(id);
 
-  // qoder 前缀带区域
-  if (s.startsWith("qoder-cn/")) return "Qoder 国内 · " + s.slice(9);
-  if (s.startsWith("qoder/")) return "Qoder 国际 · " + s.slice(6);
+  // ── 优先用上游给的真实名称（如 qoder 的 display: "Qwen3.8-Flash"）──
+  if (display && String(display).trim() !== "" && display !== id) {
+    const d = String(display).trim();
+    // qoder 带区域前缀
+    if (s.startsWith("qoder-cn/")) return "国内 · " + d;
+    if (s.startsWith("qoder/")) return "国际 · " + d;
+    return d;
+  }
+
+  // ── 没 display 时按 id 推断 ──
+  // qoder 代号兜底（后端没给 display 时）
+  if (s.startsWith("qoder-cn/") || s.startsWith("qoder/")) {
+    const isCn = s.startsWith("qoder-cn/");
+    const code = s.slice(isCn ? 9 : 6);
+    const QODER_ALIAS = {
+      "qfmodel": "Qwen3.8-Flash",
+      "dfmodel": "DeepSeek-Flash",
+      "gfmodel": "GLM-5.3-Flash",
+      "mmodel": "MiniMax-M3.1-Flash",
+      "kmodel": "Kimi",
+      "kmodel_latest": "Kimi (最新)",
+      "qmodel_38max": "Qwen3.8-Max",
+      "dmodel": "DeepSeek-Pro",
+      "gmodel": "GLM-5.3",
+      "jmodel": "模型 J",
+      "smodel": "模型 S",
+      "cmodel": "模型 C",
+      "auto": "自动选择",
+      "ultimate": "Ultimate",
+      "efficient": "Efficient",
+    };
+    const name = QODER_ALIAS[code] || code;
+    return (isCn ? "国内 · " : "国际 · ") + name;
+  }
 
   // 混元 hy 系列
   const hy = /^hy(\d+)(free|std)?(-[a-z])?$/i.exec(s);
@@ -448,21 +479,28 @@ async function importManualPath() {
 
 async function startLogin() {
   q("#loginModal").hidden = false;
-  q("#qrImage").hidden = true;
   q("#qrPlaceholder").hidden = false;
   q("#qrPlaceholder").textContent = "正在生成…";
-  q("#loginUrl").value = "";
   setLoginStatus("等待扫码…", "");
 
   try {
     const r = await apiPost("login/start", { region: "cn" });
     if (r.error) throw new Error(r.error);
     state.loginId = r.loginId;
-    q("#loginUrl").value = r.verificationUri || "";
-    q("#qrImage").src = "https://api.qrserver.com/v1/create-qr-code/?size=200x200&data="
-      + encodeURIComponent(r.verificationUri || "");
-    q("#qrImage").hidden = false;
+
+    // 不再用第三方生成二维码 —— 直接把官方链接给用户自己打开。
+    //
+    // 之前是把登录 URL 发给第三方二维码生成服务来画图，
+    // 虽然 state 一次性且 10 分钟过期，但没必要外传。
+    // 改成：显示官方链接 + 一个「打开授权页」按钮，让浏览器直达。
     q("#qrPlaceholder").hidden = true;
+    const openBtn = q("#openAuthPage");
+    if (openBtn) {
+      openBtn.hidden = false;
+      openBtn.onclick = () => {
+        if (r.verificationUri) window.open(r.verificationUri, "_blank", "noopener");
+      };
+    }
     pollLogin();
   } catch (e) {
     setLoginStatus("发起失败：" + e.message, "err");
@@ -552,7 +590,7 @@ function renderModels() {
       <label class="model-row ${sel ? "selected" : ""}">
         <input type="checkbox" data-model="${m.id}" ${sel ? "checked" : ""} />
         <span class="model-name-wrap">
-          <span class="model-pretty">${prettyModelName(m.id)}</span>
+          <span class="model-pretty">${prettyModelName(m.id, m.display)}</span>
           <span class="model-id">${m.id}</span>
           ${m.note ? '<span class="model-note"> · ' + m.note + '</span>' : ""}
         </span>
@@ -710,10 +748,6 @@ async function init() {
   q("#importManual").onclick = importManualPath;
   q("#addAccount").onclick = startLogin;
   q("#closeLogin").onclick = closeLogin;
-  q("#copyUrl").onclick = () => {
-    const v = q("#loginUrl").value;
-    if (v) { navigator.clipboard.writeText(v); notice("链接已复制", "ok", 2000); }
-  };
   q("#shimSelect").onchange = (e) => { state.shim = e.target.value; loadModels(); };
   q("#costShim").onchange = (e) => { state.costShim = e.target.value; loadCost(); };
   q("#reloadModels").onclick = loadModels;
