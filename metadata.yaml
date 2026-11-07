@@ -1,6 +1,6 @@
 name: "astrbot_plugin_shim_connector"
 display_name: "白嫖机器人 | 本机模型接入"
-short_desc: "把你已付费的 WorkBuddy / Trae / Qoder 订阅变成机器人模型源，66 个候选模型可勾选，支持多账号池和余额查看，零 API 费用。"
+short_desc: "把你已付费的 WorkBuddy / Trae / Qoder 订阅变成机器人模型源，75 个候选模型可勾选，支持多账号池和余额查看，零 API 费用。"
 author: "rawLeaf"
 description: >-
   白嫖机器人：把你已经付过钱的 AI 订阅（WorkBuddy / Trae / Qoder）直接变成 AstrBot 的模型源。
@@ -10,8 +10,8 @@ description: >-
   把已有订阅额度翻译成 OpenAI 兼容端点，自动注册成 AstrBot 的 provider。
 
 
-  边际成本 0：钱你已经付过了，只是换个入口给机器人用。合计 66 个候选模型
-  （WorkBuddy 23 / Trae 18 / Qoder 25），可按需勾选要注册哪些。
+  边际成本 0：钱你已经付过了，只是换个入口给机器人用。合计 75 个候选模型
+  （WorkBuddy 21 / Trae 18 / Qoder 36），可按需勾选要注册哪些。
 
 
   零配置：凭据从各客户端桌面端本地存储自动读取并解密，不填任何 token 或路径。
@@ -30,7 +30,7 @@ description: >-
   五个 shim 都有 /cost 耗费统计，按模型 + 按账号两个维度。
 
 
-version: "1.6.2"
+version: "1.6.3"
 repo: "https://github.com/rawLeaf/astrbot_plugin_shim_connector"
 homepage: "https://github.com/rawLeaf/astrbot_plugin_shim_connector"
 license: "MIT"
@@ -70,7 +70,7 @@ keywords:
 features:
   - "零 API 费用：复用已有订阅额度，边际成本 0"
   - "零配置：凭据从客户端桌面端自动读取解密"
-  - "66 个候选模型：WorkBuddy 23 + Trae 18 + Qoder 25，按需勾选"
+  - "75 个候选模型：WorkBuddy 23 + Trae 18 + Qoder 25，按需勾选"
   - "多账号池：扫码登录 / 导入本地 vault / 手动指定路径"
   - "余额查看：每个账号显示剩余积分，5 分钟缓存"
   - "额度用尽自动换号：冷却 30 分钟，同区换完可跨区兜底"

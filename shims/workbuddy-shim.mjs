@@ -2638,7 +2638,7 @@ const server = createServer((req, res) => {
         const roster = await fetchRoster(cred, force);
         // 补充成本/延迟信息（来自实测目录）
         const meta = new Map(MODEL_CATALOG.map((m) => [m.id, m]));
-        const models = roster.models.map((id) => {
+        let models = roster.models.map((id) => {
           const m = meta.get(id);
           return {
             id,
@@ -2647,10 +2647,32 @@ const server = createServer((req, res) => {
             free: m ? m.cost === 0 : null,
             latencyMs: m ? m.lat : null,
             note: m ? m.note : "",
+            // 是否实测过（有 cost 就说明进过 MODEL_CATALOG）
+            verified: m !== undefined,
             // 免费模型立即可用；付费模型也返回，由上层决定是否启用
             selectable: true,
           };
         });
+
+        // 默认过滤掉未实测的模型。
+        //
+        // 起因（2026-11-07）：名册里有一批模型（如 deepseek-v4-flash-ioa /
+        // deepseek-v4-pro-ioa）能出现在 /v3/config 里，但实际调用返回 502
+        // （账号权限不足）。它们不在 MODEL_CATALOG 里，cost 是 null，
+        // 在界面上显示成「?」，勾选后也调不通 —— 纯噪音。
+        //
+        // 现在默认剔除 cost === null 的。?all=1 可以看到全部（排查用）。
+        const showAll = /[?&]all=1\b/.test(url);
+        if (!showAll) {
+          const before = models.length;
+          models = models.filter((m) => m.cost !== null && m.cost !== undefined);
+          const dropped = before - models.length;
+          if (dropped > 0) {
+            console.error(
+              "[workbuddy-shim] 名册过滤：剔除 " + dropped + " 个未实测模型（用 ?all=1 查看全部）"
+            );
+          }
+        }
         // 按「免费优先 + 延迟」排序
         models.sort((a, b) => {
           const fa = a.free === true ? 0 : 1;

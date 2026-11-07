@@ -87,11 +87,25 @@ function fmtDays(ms) {
   return Math.floor(ms / 3600000) + " 小时";
 }
 
-function fmtCost(cost, free) {
+/**
+ * 格式化耗率显示。
+ *
+ * 三家上游的单位不同，不能混着显示：
+ *   Qoder      price_factor  倍率        0.1 / 0.5 / 8
+ *   Trae       rate          积分/次     0.06 / 1.83
+ *   WorkBuddy  credits       倍率        x0.15 / x0.50
+ *
+ * 统一显示成「数字 + 单位」，用 shimName 区分。
+ */
+function fmtCost(cost, free, shimName) {
   if (free === true) return '<span class="free">免费</span>';
   if (cost === null || cost === undefined) return '<span class="unknown">?</span>';
   if (cost === 0) return '<span class="free">0</span>';
-  return String(cost);
+
+  const n = String(cost);
+  // Trae 的 rate 是「积分/次」，其余是倍率
+  const unit = shimName === "trae" ? " 积分/次" : "×";
+  return '<span class="cost-val">' + n + unit + '</span>';
 }
 
 /**
@@ -121,21 +135,31 @@ function prettyModelName(id, display) {
     const isCn = s.startsWith("qoder-cn/");
     const code = s.slice(isCn ? 9 : 6);
     const QODER_ALIAS = {
+      "lmodel": "QoDuck（免费）",
       "qfmodel": "Qwen3.8-Flash",
       "dfmodel": "DeepSeek-Flash",
       "gfmodel": "GLM-5.3-Flash",
       "mmodel": "MiniMax-M3.1-Flash",
-      "kmodel": "Kimi",
-      "kmodel_latest": "Kimi (最新)",
+      "kmodel": "Kimi K2.8",
+      "kmodel_latest": "Kimi K3.1",
       "qmodel_38max": "Qwen3.8-Max",
-      "dmodel": "DeepSeek-Pro",
+      "dmodel": "DeepSeek-V4-Pro",
       "gmodel": "GLM-5.3",
-      "jmodel": "模型 J",
-      "smodel": "模型 S",
-      "cmodel": "模型 C",
+      "jmodel": "Step-5-Preview",
+      "smodel": "Sonus（最强）",
+      "cmodel": "Cantus",
       "auto": "自动选择",
       "ultimate": "Ultimate",
       "efficient": "Efficient",
+      "qwork-auto": "标准档",
+      "qwork-advanced": "进阶档",
+      "qwork-ultimate": "旗舰档",
+      "quest-auto": "Quest 自动",
+      "quest-ultimate": "Quest 旗舰",
+      "experts-auto": "专家 自动",
+      "experts-ultimate": "专家 旗舰",
+      "nap-auto": "NAP 自动",
+      "performance": "性能档",
     };
     const name = QODER_ALIAS[code] || code;
     return (isCn ? "国内 · " : "国际 · ") + name;
@@ -590,11 +614,18 @@ function renderModels() {
       <label class="model-row ${sel ? "selected" : ""}">
         <input type="checkbox" data-model="${m.id}" ${sel ? "checked" : ""} />
         <span class="model-name-wrap">
-          <span class="model-pretty">${prettyModelName(m.id, m.display)}</span>
+          <span class="model-pretty">
+            ${prettyModelName(m.id, m.display)}
+            ${m.free ? '<span class="free-badge">Free</span>' : ""}
+          </span>
           <span class="model-id">${m.id}</span>
           ${m.note ? '<span class="model-note"> · ' + m.note + '</span>' : ""}
         </span>
-        <span class="model-cost">${fmtCost(m.cost, m.free)}</span>
+        <span class="model-cost">
+          ${m.discounted && m.originalCost
+            ? '<span class="cost-orig">' + m.originalCost + '×</span> <span class="free">0×</span>'
+            : fmtCost(m.cost, m.free, state.shim)}
+        </span>
         <span class="model-latency">${fmtLatency(m.latencyMs)}</span>
         <span></span>
       </label>

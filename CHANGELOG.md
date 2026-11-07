@@ -7,6 +7,155 @@
 
 ---
 
+## [1.6.3] — 2026-11-07
+
+### 修复：Qoder 漏掉 10 个分组，看不到 QoDuck
+
+**现象**：模型名册只有 25 个，用户截图里的 `QoDuck`（标 Free）完全找不到。
+
+**根因**：上游 `model/list` 的响应是**按使用场景分组的**：
+
+```
+chat / developer / assistant / inline / quest / qwork
+experts / qwake / app / nap / byok_teams / byok_enterprise
+```
+
+原来只读 `doc.chat`，其余 10 组全部丢弃。
+
+而 **QoDuck 只在 `app` 组里**：
+
+```json
+{
+  "key": "lmodel",
+  "display_name": "QoDuck",
+  "price_factor": 0,
+  "original_price_factor": 0.5,
+  "is_free": true,
+  "tags": ["free"],
+  "enable": true
+}
+```
+
+**修法**：遍历全部 12 个分组，按 `key` 去重合并（同一个 key 会出现在多个组里），
+并记录它出现在哪些分组。
+
+**效果**：
+
+| 区 | 之前 | 现在 |
+|---|---|---|
+| qoder-cn | 11 | **12** |
+| qoder（国际） | 14 | **24** |
+| 合计 | 25 | **36** |
+
+国际区新发现的 10 个：
+
+```
+qwork-auto        Standard     0.3
+qwork-advanced    Advanced     0.6
+qwork-ultimate    Premium      1.6
+quest-auto        Auto         0.5
+quest-ultimate    Ultimate     2
+experts-auto      Auto         0.5
+experts-ultimate  Ultimate     2
+nap-auto          Auto         1
+performance       Performance  1.1
+（加上 QoDuck）
+```
+
+### 修复：免费模型判定错误
+
+**根因**：`is_free` 字段不能单独用。
+
+```json
+{"key": "qfmodel", "is_free": true, "price_factor": 0.1}
+```
+
+`is_free: true` 但 `price_factor: 0.1`，实际**要扣钱**。
+
+**修法**：只有 `price_factor === 0` 才算免费。
+
+**效果**：正确识别出 2 个免费模型（QoDuck 国内外各一），实测调用通过：
+
+```
+qoder-cn/lmodel  →  HTTP 200  "我是 Qoder，无法透露所基于的模型。"  2806ms
+```
+
+### 新增：耗率带单位
+
+三家上游的耗率单位不同，之前都显示成裸数字，容易误解：
+
+| shim | 上游字段 | 单位 | 范围 |
+|---|---|---|---|
+| **Trae** | `rate` | **积分/次** | 0.06 ~ 1.83 |
+| **Qoder** | `price_factor` | **倍率 ×** | 0.1 ~ 8 |
+| **WorkBuddy** | `credits` | **倍率 ×** | 0 ~ 0.46 |
+
+现在按 shim 显示对应单位：`0.06 积分/次` / `0.1×` / `0.46×`。
+
+顺带补上 `original_price_factor` 的原价划线显示（`0.5×` 划掉 + `0×` 绿色）。
+
+### 新增：Qoder 模型名全部翻译
+
+代号 → 可读名（25 条别名表）：
+
+| 代号 | 显示 |
+|---|---|
+| `lmodel` | QoDuck（免费） |
+| `smodel` | Sonus（最强） |
+| `cmodel` | Cantus |
+| `qwork-auto` | 标准档 |
+| `qwork-advanced` | 进阶档 |
+| `qwork-ultimate` | 旗舰档 |
+| `quest-auto` | Quest 自动 |
+| `experts-ultimate` | 专家 旗舰 |
+| `nap-auto` | NAP 自动 |
+| `performance` | 性能档 |
+
+优先用上游 `display_name`，没给才查别名表。
+
+### 修复：WorkBuddy 名册里混入调不通的模型
+
+**现象**：`deepseek-v4-flash-ioa` / `deepseek-v4-pro-ioa` 出现在名册里，
+`cost` 是 `null`（显示成「?」），勾选后实际调用返回 502（账号权限不足）。
+
+**根因**：这两个在 `/v3/config` 里有条目，但不在 `MODEL_CATALOG`（实测清单）里，
+说明从没测通过。纯噪音。
+
+**修法**：`/v3/models` 默认过滤 `cost === null` 的：
+
+```javascript
+const showAll = /[?&]all=1\b/.test(url);
+if (!showAll) {
+  models = models.filter((m) => m.cost !== null && m.cost !== undefined);
+}
+```
+
+**效果**：WorkBuddy 从 23 → **21** 个，都是能用的。`?all=1` 仍可看全部（排查用）。
+
+### 三家最终模型数
+
+| shim | 模型数 | 免费 | 耗率范围 |
+|---|---|---|---|
+| WorkBuddy | **21** | 12 | 0 ~ 0.46× |
+| Trae | **18** | 0 | 0.06 ~ 1.83 积分/次 |
+| Qoder | **36** | 2 | 0.1 ~ 8× |
+| **合计** | **75** | **14** | |
+
+### 验证
+
+| 检查 | 结果 |
+|---|---|
+| Qoder 模型数 | ✅ 25 → 36 |
+| QoDuck 找到 | ✅ 国内外各 1 个 |
+| QoDuck 实测调用 | ✅ HTTP 200，2806ms |
+| 免费判定 | ✅ 2 个（QoDuck） |
+| Trae 耗率 | ✅ 18/18 都有 |
+| WorkBuddy 过滤 | ✅ 23 → 21，无 null |
+| `?all=1` 兜底 | ✅ 23 个 |
+| 语法 | ✅ 全过 |
+
+---
+
 ## [1.6.2] — 2026-11-07
 
 ### 文档：插件描述全面更新
@@ -1753,6 +1902,7 @@ Trae 实测真实对话返回正常（`DeepSeek-V4-Flash-Official`）。
 
 | 版本 | commit | 要点 |
 |---|---|---|
+| 1.6.3 | 待定 | Qoder 36 模型（含 QoDuck）、耗率带单位、过滤 null 模型 |
 | 1.6.2 | 待定 | 插件描述更新：66 个模型、多账号、余额、WebUI |
 | 1.6.1 | 待定 | 移除第三方二维码、vault uid 去重、qoder 真实名称、hidden 修复 |
 | 1.6.0 | 待定 | 多账号池 + 扫码登录 + 余额 + WebUI 页面 + 5 shim 耗费统计 |

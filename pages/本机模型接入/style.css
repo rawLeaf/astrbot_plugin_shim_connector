@@ -390,3 +390,27 @@ body {
   color: #a9c4f0;
 }
 .scope-note strong { color: #cfe0ff; }
+
+
+/* 免费徽章 */
+.free-badge {
+  display: inline-block;
+  background: #10331f;
+  color: #6fdc9b;
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 999px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+/* 原价划线 */
+.cost-orig {
+  text-decoration: line-through;
+  color: var(--dim);
+  opacity: .6;
+  font-size: 11.5px;
+}
+
+.cost-val { font-variant-numeric: tabular-nums; }

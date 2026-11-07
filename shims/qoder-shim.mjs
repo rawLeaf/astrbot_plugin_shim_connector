@@ -304,6 +304,21 @@ function authHeaders(body, url, credential) {
 // ── 模型目录 ──────────────────────────────────────────────────────────
 const catalogCache = new Map();
 
+/**
+ * 拉取某区的完整模型名册。
+ *
+ * 2026-11-07 修正：原来只读 doc.chat，漏掉了其它分组。
+ *
+ * 上游响应是**按使用场景分组的**，chat 只是其中一组：
+ *   chat / developer / assistant / inline / quest / qwork
+ *   experts / qwake / app / nap / byok_teams / byok_enterprise
+ *
+ * 比如 QoDuck（key=lmodel，price_factor=0 的免费模型）只在 app 组里，
+ * 只读 chat 就永远看不到它。
+ *
+ * 现在遍历所有分组，按 key 去重合并（同一个 key 会出现在多个组里）。
+ * 保留首次出现时的完整字段，并记录它出现在哪些分组。
+ */
 async function fetchCatalog(regionId) {
   if (catalogCache.has(regionId)) return catalogCache.get(regionId);
   const region = REGIONS[regionId];
@@ -318,15 +333,40 @@ async function fetchCatalog(regionId) {
   });
   if (!res.ok) throw new Error("model list HTTP " + res.status);
   const doc = await res.json();
-  const list = Array.isArray(doc.chat) ? doc.chat : [];
-  const models = list.map((m) => ({
-    key: m.key,
-    name: m.display_name ?? m.key,
-    reasoning: m.is_reasoning === true,
-    vl: m.is_vl === true,
-    priceFactor: m.price_factor ?? 0,
-    maxInputTokens: m.max_input_tokens ?? 200000,
-  }));
+
+  // 遍历所有分组，按 key 去重
+  const byKey = new Map();
+  for (const [group, list] of Object.entries(doc)) {
+    if (!Array.isArray(list)) continue;
+    for (const m of list) {
+      if (!m || typeof m.key !== "string" || m.key === "") continue;
+      const key = m.key;
+      if (byKey.has(key)) {
+        const prev = byKey.get(key);
+        if (!prev.groups.includes(group)) prev.groups.push(group);
+        // 若之前分组里 enable=false 而这里 true，以 true 为准
+        if (m.enable === true) prev.enable = true;
+        continue;
+      }
+      byKey.set(key, {
+        key,
+        name: m.display_name ?? key,
+        reasoning: m.is_reasoning === true,
+        vl: m.is_vl === true,
+        priceFactor: m.price_factor ?? 0,
+        originalPriceFactor: m.original_price_factor ?? null,
+        isFree: m.is_free === true,
+        tags: Array.isArray(m.tags) ? m.tags.slice() : [],
+        enable: m.enable === true,
+        isDefault: m.is_default === true,
+        litePlan: m.is_lite_plan === true,
+        maxInputTokens: m.max_input_tokens ?? 200000,
+        groups: [group],
+      });
+    }
+  }
+
+  const models = [...byKey.values()];
   catalogCache.set(regionId, models);
   return models;
 }
@@ -798,11 +838,27 @@ const server = createServer((req, res) => {
         for (const region of Object.keys(REGIONS)) {
           const list = await fetchCatalog(region);
           for (const m of list) {
+            // 免费判定：price_factor === 0 才是真免费（这条最可靠）
+            //
+            // 注意 is_free 不能单独用：chat 组里的 qfmodel 标了 is_free=true
+            // 但 price_factor=0.1，实际要扣钱。
+            const isZeroPrice = (m.priceFactor ?? 0) === 0;
+            const free = isZeroPrice;
             models.push({
               id: region + "/" + m.key,
               display: m.name ?? m.key,
               cost: m.priceFactor ?? 0,
-              free: (m.priceFactor ?? 0) === 0,
+              originalCost: m.originalPriceFactor ?? null,
+              free,
+              // 有原价且现价为 0 → 是促销/免费额度
+              discounted: free && (m.originalPriceFactor ?? 0) > 0,
+              tags: m.tags ?? [],
+              enabled: m.enable === true,
+              isDefault: m.isDefault === true,
+              litePlan: m.litePlan === true,
+              groups: m.groups ?? [],
+              // 同一个 key 在多个分组里出现，分组数多说明通用性强
+              groupCount: (m.groups ?? []).length,
               multimodal: m.vl === true,
               reasoning: m.reasoning === true,
               maxTokens: m.maxInputTokens ?? null,
@@ -810,12 +866,16 @@ const server = createServer((req, res) => {
             });
           }
         }
-        // 免费优先，再按成本升序
+        // 排序：免费 → 启用的 → 成本 → 分组数
         models.sort((a, b) => {
           const fa = a.free ? 0 : 1;
           const fb = b.free ? 0 : 1;
           if (fa !== fb) return fa - fb;
-          return (a.cost ?? 0) - (b.cost ?? 0);
+          const ea = a.enabled ? 0 : 1;
+          const eb = b.enabled ? 0 : 1;
+          if (ea !== eb) return ea - eb;
+          if ((a.cost ?? 0) !== (b.cost ?? 0)) return (a.cost ?? 0) - (b.cost ?? 0);
+          return (b.groupCount ?? 0) - (a.groupCount ?? 0);
         });
         sendJson(res, 200, {
           ok: true,
