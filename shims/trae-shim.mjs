@@ -15,6 +15,7 @@
  */
 
 import { createServer } from "node:http";
+import { fileURLToPath } from "node:url";
 import { createDecipheriv, createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -135,11 +136,122 @@ function loadCredentialFromDesktop() {
   );
 }
 
+// ── 耗费统计 ────────────────────────────────────────────────
+//
+// 累计每个模型的调用次数、token 用量、以及上游返回的成本字段（若有）。
+// 落盘到 .trae-cost.json，供 /cost 查询。
+
+const COST_FILE = process.env.TRAE_COST_FILE ||
+  join(fileURLToPath(new URL(".", import.meta.url)), ".trae-cost.json");
+
+let costStats = (() => {
+  try {
+    const doc = JSON.parse(readFileSync(COST_FILE, "utf8"));
+    if (doc && typeof doc === "object" && doc.byModel) {
+      return { byModel: doc.byModel, since: doc.since || new Date().toISOString() };
+    }
+  } catch { /* 首次运行 */ }
+  return { byModel: {}, since: new Date().toISOString() };
+})();
+
+let costDirty = false;
+
+/** 记录一次成功调用。 */
+function recordCost(model, credit, usage) {
+  if (!model) return;
+  const cur = costStats.byModel[model] || {
+    calls: 0, credit: 0, promptTokens: 0, completionTokens: 0, fails: 0,
+  };
+  cur.calls += 1;
+  if (credit !== null && credit !== undefined) {
+    cur.credit = Number((cur.credit + (Number(credit) || 0)).toFixed(4));
+  }
+  if (usage) {
+    cur.promptTokens += Number(usage.prompt_tokens || 0);
+    cur.completionTokens += Number(usage.completion_tokens || 0);
+  }
+  costStats.byModel[model] = cur;
+  costDirty = true;
+}
+
+/** 记录一次失败。 */
+function recordFail(model) {
+  if (!model) return;
+  const cur = costStats.byModel[model] || {
+    calls: 0, credit: 0, promptTokens: 0, completionTokens: 0, fails: 0,
+  };
+  cur.fails += 1;
+  costStats.byModel[model] = cur;
+  costDirty = true;
+}
+
+/** 落盘（只在有变化时写）。 */
+function flushCost() {
+  if (!costDirty) return;
+  try {
+    writeFileSync(
+      COST_FILE,
+      JSON.stringify({ ...costStats, updatedAt: new Date().toISOString() }, null, 2),
+      "utf8",
+    );
+    costDirty = false;
+  } catch (e) {
+    console.error("[TRAE-shim] 写耗费统计失败: " + String(e));
+  }
+}
+
+setInterval(flushCost, 30000).unref?.();
+
+/**
+ * 构造 /cost 的响应体。
+ */
+function buildCostResponse() {
+  const byModel = costStats.byModel || {};
+  let totalCredit = 0;
+  let totalCalls = 0;
+  let totalFails = 0;
+
+  const rows = Object.entries(byModel)
+    .map(([id, x]) => {
+      const calls = x.calls || 0;
+      const credit = Number((x.credit || 0).toFixed(4));
+      totalCredit += credit;
+      totalCalls += calls;
+      totalFails += x.fails || 0;
+      return {
+        model: id,
+        calls,
+        fails: x.fails || 0,
+        credit,
+        costPerCall: calls > 0 ? Number((credit / calls).toFixed(4)) : null,
+        free: calls > 0 && credit === 0,
+        measured: calls > 0,
+        promptTokens: x.promptTokens || 0,
+        completionTokens: x.completionTokens || 0,
+      };
+    })
+    .sort((a, b) => b.credit - a.credit || b.calls - a.calls);
+
+  return {
+    ok: true,
+    since: costStats.since,
+    totalCredit: Number(totalCredit.toFixed(4)),
+    totalCalls,
+    totalFails,
+    byModel: rows,
+  };
+}
+
 const PORT = Number(process.env.TRAE_SHIM_PORT ?? 8788);
 const TOKEN = process.env.TRAE_SHIM_TOKEN ?? "sk-trae-local";
 const HOST = "127.0.0.1";
 const CHAT_BASE = "https://trae-api-cn.mchost.guru";
 const CHAT_PATH = "/api/agent/v3/llm_utils_chat";
+/**
+ * Trae 客户端的**公开应用标识**，写死在客户端本体里，所有用户完全相同。
+ * 不是你的账号 ID，也不是任何个人数据 —— 它用于上游区分"这是 Trae 客户端"。
+ * 来源：Trae CN 安装目录的 app.asar 常量表。
+ */
 const APP_ID = "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8";
 
 /**
@@ -689,8 +801,17 @@ function aggregateSse(text, model) {
     if (choice.finish_reason) finishReason = choice.finish_reason;
   }
 
-  const message = { role: "assistant", content: content || null };
+  // content 为空但 reasoning 有值时，用 reasoning 顶替（同 workbuddy）
+  let finalContent = content;
+  let contentFromReasoning = false;
+  if ((finalContent === "" || finalContent === null || finalContent === undefined) && reasoning) {
+    finalContent = reasoning;
+    contentFromReasoning = true;
+  }
+
+  const message = { role: "assistant", content: finalContent || null };
   if (reasoning) message.reasoning_content = reasoning;
+  if (contentFromReasoning) message._content_from_reasoning = true;
   // 上游报错且没有任何正文：把原始错误带出去，避免静默的 content:null
   if (upstreamError !== null && content === "") {
     message.content = null;
@@ -761,6 +882,12 @@ async function handleChat(req, res) {
     // OpenAI SDK 解析会拿到空内容。这里改成：聚合完再自己重发标准 SSE。
     const text = await upstream.text();
     const out = aggregateSse(text, model);
+    // 记录耗费
+    try {
+      const u = out.usage || {};
+      recordCost(model, u.credit ?? null, u);
+      flushCost();
+    } catch { /* 统计失败不影响主流程 */ }
     const msg = out.choices[0].message;
 
     res.writeHead(200, {
@@ -796,11 +923,33 @@ async function handleChat(req, res) {
   }
 
   const text = await upstream.text();
-  sendJson(res, 200, aggregateSse(text, model));
+  const finalOut = aggregateSse(text, model);
+  try {
+    const u = finalOut.usage || {};
+    recordCost(model, u.credit ?? null, u);
+    flushCost();
+  } catch { /* ignore */ }
+  sendJson(res, 200, finalOut);
 }
 
 const server = createServer((req, res) => {
   const url = req.url ?? "/";
+  // 耗费统计
+  if (req.method === "GET" && (url === "/cost" || url.startsWith("/cost?"))) {
+    sendJson(res, 200, buildCostResponse());
+    return;
+  }
+
+  // 重置耗费统计
+  if (req.method === "POST" && (url === "/cost/reset" || url.startsWith("/cost/reset?"))) {
+    costStats = { byModel: {}, since: new Date().toISOString() };
+    costDirty = true;
+    flushCost();
+    console.error("[TRAE-shim] 耗费统计已重置");
+    sendJson(res, 200, { ok: true, message: "耗费统计已重置", since: costStats.since });
+    return;
+  }
+
   if (req.method === "GET" && (url === "/healthz" || url === "/healthz/")) {
     sendJson(res, 200, { ok: true, provider: "trae", port: PORT });
     return;

@@ -21,6 +21,112 @@ import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 
+// ── 耗费统计 ────────────────────────────────────────────────
+//
+// 累计每个模型的调用次数、token 用量、以及上游返回的成本字段（若有）。
+// 落盘到 .vision-cost.json，供 /cost 查询。
+
+const COST_FILE = process.env.VISION_COST_FILE ||
+  join(fileURLToPath(new URL(".", import.meta.url)), ".vision-cost.json");
+
+let costStats = (() => {
+  try {
+    const doc = JSON.parse(readFileSync(COST_FILE, "utf8"));
+    if (doc && typeof doc === "object" && doc.byModel) {
+      return { byModel: doc.byModel, since: doc.since || new Date().toISOString() };
+    }
+  } catch { /* 首次运行 */ }
+  return { byModel: {}, since: new Date().toISOString() };
+})();
+
+let costDirty = false;
+
+/** 记录一次成功调用。 */
+function recordCost(model, credit, usage) {
+  if (!model) return;
+  const cur = costStats.byModel[model] || {
+    calls: 0, credit: 0, promptTokens: 0, completionTokens: 0, fails: 0,
+  };
+  cur.calls += 1;
+  if (credit !== null && credit !== undefined) {
+    cur.credit = Number((cur.credit + (Number(credit) || 0)).toFixed(4));
+  }
+  if (usage) {
+    cur.promptTokens += Number(usage.prompt_tokens || 0);
+    cur.completionTokens += Number(usage.completion_tokens || 0);
+  }
+  costStats.byModel[model] = cur;
+  costDirty = true;
+}
+
+/** 记录一次失败。 */
+function recordFail(model) {
+  if (!model) return;
+  const cur = costStats.byModel[model] || {
+    calls: 0, credit: 0, promptTokens: 0, completionTokens: 0, fails: 0,
+  };
+  cur.fails += 1;
+  costStats.byModel[model] = cur;
+  costDirty = true;
+}
+
+/** 落盘（只在有变化时写）。 */
+function flushCost() {
+  if (!costDirty) return;
+  try {
+    writeFileSync(
+      COST_FILE,
+      JSON.stringify({ ...costStats, updatedAt: new Date().toISOString() }, null, 2),
+      "utf8",
+    );
+    costDirty = false;
+  } catch (e) {
+    console.error("[VISION-shim] 写耗费统计失败: " + String(e));
+  }
+}
+
+setInterval(flushCost, 30000).unref?.();
+
+/**
+ * 构造 /cost 的响应体。
+ */
+function buildCostResponse() {
+  const byModel = costStats.byModel || {};
+  let totalCredit = 0;
+  let totalCalls = 0;
+  let totalFails = 0;
+
+  const rows = Object.entries(byModel)
+    .map(([id, x]) => {
+      const calls = x.calls || 0;
+      const credit = Number((x.credit || 0).toFixed(4));
+      totalCredit += credit;
+      totalCalls += calls;
+      totalFails += x.fails || 0;
+      return {
+        model: id,
+        calls,
+        fails: x.fails || 0,
+        credit,
+        costPerCall: calls > 0 ? Number((credit / calls).toFixed(4)) : null,
+        free: calls > 0 && credit === 0,
+        measured: calls > 0,
+        promptTokens: x.promptTokens || 0,
+        completionTokens: x.completionTokens || 0,
+      };
+    })
+    .sort((a, b) => b.credit - a.credit || b.calls - a.calls);
+
+  return {
+    ok: true,
+    since: costStats.since,
+    totalCredit: Number(totalCredit.toFixed(4)),
+    totalCalls,
+    totalFails,
+    byModel: rows,
+  };
+}
+
 const PORT = Number(process.env.VISION_SHIM_PORT ?? 8791);
 const TOKEN = process.env.VISION_SHIM_TOKEN ?? "sk-vision-local";
 const HOST = "127.0.0.1";
@@ -376,6 +482,12 @@ async function handleChat(req, res) {
       out.model = VIRTUAL_MODEL;
       out._vision_target = t.id;
       console.error("[vision-shim] " + t.id + " OK " + ms + "ms");
+      // 记录耗费（按实际命中的 target 记，便于看出哪个上游在花钱）
+      try {
+        const u = out.usage || {};
+        recordCost(t.id, u.credit ?? null, u);
+        flushCost();
+      } catch { /* ignore */ }
       sendJson(res, 200, out);
       return;
     }
@@ -445,6 +557,22 @@ const server = createServer((req, res) => {
     return;
   }
   // 重置健康分（所有目标回到初始值）
+  // 耗费统计
+  if (req.method === "GET" && (url === "/cost" || url.startsWith("/cost?"))) {
+    sendJson(res, 200, buildCostResponse());
+    return;
+  }
+
+  // 重置耗费统计
+  if (req.method === "POST" && (url === "/cost/reset" || url.startsWith("/cost/reset?"))) {
+    costStats = { byModel: {}, since: new Date().toISOString() };
+    costDirty = true;
+    flushCost();
+    console.error("[VISION-shim] 耗费统计已重置");
+    sendJson(res, 200, { ok: true, message: "耗费统计已重置", since: costStats.since });
+    return;
+  }
+
   if (req.method === "POST" && (url === "/reset-health" || url === "/reset-health/")) {
     for (const t of targets) {
       t.score = INITIAL_SCORE;

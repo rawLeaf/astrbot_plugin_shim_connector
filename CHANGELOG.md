@@ -7,6 +7,212 @@
 
 ---
 
+## [1.6.0] — 2026-11-07
+
+### 新增：多账号池 + 扫码登录 + 余额查询
+
+**这是本轮最大的功能块。**
+
+#### 多账号 vault
+
+账号存在独立目录，按区域分：
+
+```
+<插件>/shims/.vault/
+├── cn/<accountId>.json       国内账号（token 明文，0600）
+└── global/<accountId>.json   国际账号
+```
+
+**不碰 dsh-connect-workbuddy 的 vault**，但可以从它导入。
+
+#### 三种添加方式
+
+| 方式 | 说明 |
+|---|---|
+| **自动检测** | 扫描 `DSH_HOME`、`~/.dsh`、各盘符的 `dev/dsh-home` 等常见位置 |
+| **手动指定** | 粘贴 vault 文件夹路径 |
+| **扫码登录** | 复刻 dsh 的 OAuth 流程，手机扫码拿 token |
+
+**自动检测会报告「找过哪些位置」**，没找到时用户知道该去哪找。
+
+#### 额度用尽自动换号
+
+```
+请求 → 当前账号
+        ↓ 14018 / 1113（额度问题）
+   冷却 30 分钟，换同区下一个账号
+        ↓ 同区没了
+   跨区兜底（可关：WB_CROSS_REGION=0）
+        ↓ 都不行
+   如实报错
+```
+
+响应头标记：
+
+| 头 | 值 | 含义 |
+|---|---|---|
+| `X-WB-Fallback` | `account-switch` | 同区换号 |
+| `X-WB-Fallback` | `cross-region` | 跨区 |
+| `X-WB-Account` | 账号前缀 | 这次用的哪个 |
+
+#### 余额查询
+
+上游接口：`POST {billingBase}/v2/billing/meter/get-user-resource`
+
+协议参考 dsh-connect-workbuddy/scripts/probe-credits.mjs（MIT）。
+
+界面显示每个账号的剩余积分，缓存 5 分钟，`?balance=0` 可跳过。
+
+实测对上用户 dsh 面板的数字：1167 / 1191 / 0 / 1937。
+
+#### 账号测试
+
+每个账号一个「测试」按钮：发一个最小请求（hy3, max_tokens=16），
+回报延迟 + 当前积分 + 是否正常。能区分额度用尽/超时/网络错误。
+
+### 新增：WebUI 页面（挂到「扩展功能」）
+
+`pages/本机模型接入/` 三个标签页：
+
+**账号池**
+- 国内 / 国际分区切换
+- 每个账号显示：昵称、账号 id、有效期剩余天数、**积分大字**
+- 操作：切换 / 测试 / 删除
+- 扫码添加（弹窗 + 二维码 + 轮询）
+
+**模型名册**
+- WorkBuddy 国内/国际、Qoder、Trae 分组选择
+- Qoder 支持「全部 / 国内版 / 国际版」过滤（11 + 14 个）
+- 按「免费 → 成本 → 延迟」排序
+- 两级显示：可读名 + 原始 id
+- 勾选启停 + 保存
+
+**耗费**
+- 累计 credit / 调用数 / 失败数
+- 按账号统计 + 按模型统计
+- 重置
+
+### 新增：5 个 shim 全部支持耗费统计
+
+之前只有 workbuddy 有 `/cost`。现在 trae / qoder / vision / llm-pool 都有：
+
+| shim | 统计文件 |
+|---|---|
+| workbuddy | `.wb-cost.json` |
+| trae | `.trae-cost.json` |
+| qoder | `.qoder-cost.json` |
+| vision | `.vision-cost.json` |
+| llm-pool | `.llm-pool-cost.json` |
+
+全部加入 `.gitignore`。
+
+同时放开了 `main.py` 里 `startswith("workbuddy-shim")` 的限制。
+
+### 新增：select-models 保存后立刻重新注册
+
+之前只写配置文件，AstrBot 的模型下拉不会变，必须重载插件。
+
+现在：
+
+```python
+conf_path.write_text(...)                       # 保存配置
+await self._unregister_providers(name)          # 注销旧的
+await self._register_provider(name)             # 按新配置注册
+conf.save_config()                              # 写入 AstrBot 配置
+```
+
+返回带 `reregistered` 字段，失败也有 `reregisterError`（配置仍已保存）。
+
+### 修复：推理模型 content 为空
+
+**问题**：`hy4-preview` 这类模型只吐 `reasoning_content`，`content` 恒为 `null`。
+下游只读 `content` 就会认为「模型返回空」，白白用掉一次 fallback 重试。
+
+**修法**（三个 shim 都加）：
+
+```javascript
+let finalContent = content;
+if ((finalContent === "" || finalContent === null) && reasoning) {
+  finalContent = reasoning;
+  contentFromReasoning = true;
+}
+const message = { role: "assistant", content: finalContent || null };
+if (reasoning) message.reasoning_content = reasoning;
+if (contentFromReasoning) message._content_from_reasoning = true;
+```
+
+`reasoning_content` 仍保留，能区分「这句是思考过程」的客户端不受影响。
+正常模型不触发（实测 glm-5.2 / deepseek-v4.1-flash / space-bunny / hy3 都是原生）。
+
+### 修复：8 个路由不处理 query string
+
+用户报 `GET /v3/models?force=1` 返回 404。
+
+根因：路由条件只做全等匹配，带 query 时过不了 `url === "/v3/models"`。
+
+同一文件 8 个路由都有这个问题，全部加 `startsWith("?")`：
+
+`/v3/models` `/v1/models` `/cost/reset` `/refresh-models`
+`/v1/chat/completions` `/healthz` `/debug-v3-config`
+
+`force` 判定也改成正则，兼容 `?force=1&x=y`。
+
+### 修复：API 路径少了 /v1
+
+文档和代码里全写的 `/api/plugins/extensions/`，实际是
+`/api/v1/plugins/extensions/`。导致所有页面请求 404。
+
+### 修复：路由名用连字符但前端用斜杠
+
+`accounts-scan` vs `accounts/scan`，全部改成斜杠形式与前端一致。
+
+### 修复：qoder / trae 缺 import
+
+注入耗费统计时漏了 `fileURLToPath` / `writeFileSync`，导致进程起不来。
+
+### 修复：intl 区 /v1/models 显示 source: probe
+
+根因不是 intl 拿不到名册，是 `/v1/models` 只用 `rosterCache` 缓存值，
+而缓存只在调过 `/v3/models` 之后才有 → 永远退回探测结果。CN 区也一样。
+
+改为主动拉名册，加了启动预热。
+
+### 修复：cost: 0 但实际扣费
+
+`/v3/models` 里 kimi 三个标 `cost=0 / free=true`，实测每次扣钱：
+
+| 模型 | 实测 |
+|---|---|
+| kimi-k3-1 | 0.46/次 |
+| kimi-k3.1-pro | 0.365/次 |
+| kimi-k2.8-preview | 0.17/次 |
+
+`MODEL_CATALOG` 改按实测填，加 `verified` 字段区分「有实测」和「按上游推测」。
+
+### 文档
+
+- README 加「账号池」章节 + 「多账号池化：风险显著升高」警告
+- 新增 `模型管理说明.md`（5.2KB / 8 章节）
+- SKILL.md 写入发布纪律（只有用户明确说「推送」才 push）
+
+### 验证
+
+| 检查 | 结果 |
+|---|---|
+| 5 个 shim /cost | ✅ 全部 200 |
+| 实际调用记录 | ✅ trae / qoder 都记录 |
+| 账号列表 + 余额 | ✅ 5 个账号全部查到 |
+| 扫码登录 | ✅ 拿到真实授权链接 |
+| select-models 自动注册 | ✅ reregistered: true |
+| 模型名册 3 家 | ✅ 23 / 18 / 25 |
+| 推理模型兜底 | ✅ hy4-preview 有内容了 |
+| 正常模型不误触 | ✅ 5 个模型全原生 |
+| hy4-preview 从 fallback 移除 | ✅ 10 个配置 |
+| Python / JSON / 5 shim / app.js | ✅ |
+| 安全扫描 | ✅ 干净 |
+
+---
+
 ## [1.5.4] — 2026-11-05
 
 ### 新增：跨区兜底（额度用尽自动换区）
@@ -17,8 +223,8 @@
 
 | 区 | uid | 过期时间 |
 |---|---|---|
-| CN | eecdc230… | 2026-11-12 |
-| INTL | 62325ccc… | 2027-10-14 |
+| CN | `<uid>` | 2026-11-12 |
+| INTL | `<另一个 uid>` | 2027-10-14 |
 
 实测同一时刻：
 
@@ -1342,6 +1548,7 @@ Trae 实测真实对话返回正常（`DeepSeek-V4-Flash-Official`）。
 
 | 版本 | commit | 要点 |
 |---|---|---|
+| 1.6.0 | 待定 | 多账号池 + 扫码登录 + 余额 + WebUI 页面 + 5 shim 耗费统计 |
 | 1.5.4 | 待定 | 跨区兜底：额度用尽自动切到另一个区 |
 | 1.5.3 | 待定 | 修 8 个路由的 query bug；成本按实测；模型管理接口 |
 | 1.5.2 | 待定 | 官方模型名册 + 耗费统计；发现 hy4free 免费版 |

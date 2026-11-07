@@ -11,3 +11,10 @@ shims/.wb-models.json
 shims/.vision-health.json
 shims/.llm-pool-health.json
 shims/.wb-cost.json
+# 账号 vault（含 token，绝对不能进仓库）
+shims/.vault/
+# shim 运行时缓存
+shims/.trae-cost.json
+shims/.qoder-cost.json
+shims/.vision-cost.json
+shims/.llm-pool-cost.json

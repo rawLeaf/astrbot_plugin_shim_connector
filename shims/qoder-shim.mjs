@@ -15,11 +15,118 @@
 
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import {existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
+
+// ── 耗费统计 ────────────────────────────────────────────────
+//
+// 累计每个模型的调用次数、token 用量、以及上游返回的成本字段（若有）。
+// 落盘到 .qoder-cost.json，供 /cost 查询。
+
+const COST_FILE = process.env.QODER_COST_FILE ||
+  join(fileURLToPath(new URL(".", import.meta.url)), ".qoder-cost.json");
+
+let costStats = (() => {
+  try {
+    const doc = JSON.parse(readFileSync(COST_FILE, "utf8"));
+    if (doc && typeof doc === "object" && doc.byModel) {
+      return { byModel: doc.byModel, since: doc.since || new Date().toISOString() };
+    }
+  } catch { /* 首次运行 */ }
+  return { byModel: {}, since: new Date().toISOString() };
+})();
+
+let costDirty = false;
+
+/** 记录一次成功调用。 */
+function recordCost(model, credit, usage) {
+  if (!model) return;
+  const cur = costStats.byModel[model] || {
+    calls: 0, credit: 0, promptTokens: 0, completionTokens: 0, fails: 0,
+  };
+  cur.calls += 1;
+  if (credit !== null && credit !== undefined) {
+    cur.credit = Number((cur.credit + (Number(credit) || 0)).toFixed(4));
+  }
+  if (usage) {
+    cur.promptTokens += Number(usage.prompt_tokens || 0);
+    cur.completionTokens += Number(usage.completion_tokens || 0);
+  }
+  costStats.byModel[model] = cur;
+  costDirty = true;
+}
+
+/** 记录一次失败。 */
+function recordFail(model) {
+  if (!model) return;
+  const cur = costStats.byModel[model] || {
+    calls: 0, credit: 0, promptTokens: 0, completionTokens: 0, fails: 0,
+  };
+  cur.fails += 1;
+  costStats.byModel[model] = cur;
+  costDirty = true;
+}
+
+/** 落盘（只在有变化时写）。 */
+function flushCost() {
+  if (!costDirty) return;
+  try {
+    writeFileSync(
+      COST_FILE,
+      JSON.stringify({ ...costStats, updatedAt: new Date().toISOString() }, null, 2),
+      "utf8",
+    );
+    costDirty = false;
+  } catch (e) {
+    console.error("[QODER-shim] 写耗费统计失败: " + String(e));
+  }
+}
+
+setInterval(flushCost, 30000).unref?.();
+
+/**
+ * 构造 /cost 的响应体。
+ */
+function buildCostResponse() {
+  const byModel = costStats.byModel || {};
+  let totalCredit = 0;
+  let totalCalls = 0;
+  let totalFails = 0;
+
+  const rows = Object.entries(byModel)
+    .map(([id, x]) => {
+      const calls = x.calls || 0;
+      const credit = Number((x.credit || 0).toFixed(4));
+      totalCredit += credit;
+      totalCalls += calls;
+      totalFails += x.fails || 0;
+      return {
+        model: id,
+        calls,
+        fails: x.fails || 0,
+        credit,
+        costPerCall: calls > 0 ? Number((credit / calls).toFixed(4)) : null,
+        free: calls > 0 && credit === 0,
+        measured: calls > 0,
+        promptTokens: x.promptTokens || 0,
+        completionTokens: x.completionTokens || 0,
+      };
+    })
+    .sort((a, b) => b.credit - a.credit || b.calls - a.calls);
+
+  return {
+    ok: true,
+    since: costStats.since,
+    totalCredit: Number(totalCredit.toFixed(4)),
+    totalCalls,
+    totalFails,
+    byModel: rows,
+  };
+}
 
 const PORT = Number(process.env.QODER_SHIM_PORT ?? 8789);
 const TOKEN = process.env.QODER_SHIM_TOKEN ?? "sk-qoder-local";
@@ -389,6 +496,7 @@ function framesToOpenAI(text) {
 
 function aggregate(frames, model) {
   let content = "";
+  let reasoning = "";
   let sawChunk = false;
   const toolCalls = new Map();
   let finishReason = "stop";
@@ -401,6 +509,7 @@ function aggregate(frames, model) {
     if (!choice) { sawChunk = true; continue; }
     const delta = choice.delta || {};
     if (typeof delta.content === "string") content += delta.content;
+    if (typeof delta.reasoning_content === "string") reasoning += delta.reasoning_content;
     if (Array.isArray(delta.tool_calls)) {
       for (const tc of delta.tool_calls) {
         const idx = tc.index ?? 0;
@@ -413,7 +522,17 @@ function aggregate(frames, model) {
     }
     if (choice.finish_reason) finishReason = choice.finish_reason;
   }
-  const message = { role: "assistant", content: content || null };
+  // content 为空但 reasoning 有值时，用 reasoning 顶替（同 workbuddy）
+  let finalContent = content;
+  let contentFromReasoning = false;
+  if ((finalContent === "" || finalContent === null || finalContent === undefined) && reasoning) {
+    finalContent = reasoning;
+    contentFromReasoning = true;
+  }
+
+  const message = { role: "assistant", content: finalContent || null };
+  if (reasoning) message.reasoning_content = reasoning;
+  if (contentFromReasoning) message._content_from_reasoning = true;
   if (toolCalls.size > 0) {
     message.tool_calls = [...toolCalls.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v);
     if (finishReason === "stop") finishReason = "tool_calls";
@@ -600,7 +719,13 @@ async function handleChat(req, res) {
     return;
   }
   try {
-    sendJson(res, 200, aggregate(framesToOpenAI(decided.text), input.model ?? key));
+    const qOut = aggregate(framesToOpenAI(decided.text), input.model ?? key);
+  try {
+    const u = qOut.usage || {};
+    recordCost(input.model ?? key, u.credit ?? null, u);
+    flushCost();
+  } catch { /* ignore */ }
+  sendJson(res, 200, qOut);
   } catch (error) {
     const queued = error?.qoderQueue === true;
     sendError(
@@ -614,6 +739,22 @@ async function handleChat(req, res) {
 
 const server = createServer((req, res) => {
   const url = req.url ?? "/";
+  // 耗费统计
+  if (req.method === "GET" && (url === "/cost" || url.startsWith("/cost?"))) {
+    sendJson(res, 200, buildCostResponse());
+    return;
+  }
+
+  // 重置耗费统计
+  if (req.method === "POST" && (url === "/cost/reset" || url.startsWith("/cost/reset?"))) {
+    costStats = { byModel: {}, since: new Date().toISOString() };
+    costDirty = true;
+    flushCost();
+    console.error("[QODER-shim] 耗费统计已重置");
+    sendJson(res, 200, { ok: true, message: "耗费统计已重置", since: costStats.since });
+    return;
+  }
+
   if (req.method === "GET" && (url === "/healthz" || url === "/healthz/")) {
     sendJson(res, 200, { ok: true, provider: "qoder", port: PORT });
     return;

@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>本机模型接入</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <h1>本机模型接入</h1>
+      <div class="meta" id="meta">加载中…</div>
+      <button class="btn ghost" id="refreshAll" type="button">刷新</button>
+    </header>
+
+    <div class="notice" id="notice" hidden></div>
+
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-tab="accounts" type="button">账号池</button>
+      <button class="tab" data-tab="models" type="button">模型名册</button>
+      <button class="tab" data-tab="cost" type="button">耗费</button>
+    </nav>
+
+    <!-- 账号池 -->
+    <section class="panel" id="panel-accounts">
+      <div class="panel-head">
+        <h2>账号池</h2>
+        <div class="row">
+          <label class="switch">
+            <input type="checkbox" id="autoTune" />
+            <span>自动调序</span>
+          </label>
+          <button class="btn" id="scanVaults" type="button">检测本地账号</button>
+          <button class="btn primary" id="addAccount" type="button">扫码添加</button>
+        </div>
+      </div>
+      <details class="explain-box" open>
+        <summary>「自动调序」是什么？</summary>
+        <div class="explain-body">
+          <p><strong>开启后</strong>（默认）：每次请求自动挑一个可用的账号发出去。
+          如果这个账号额度用尽（上游返回 14018），<strong>自动换下一个继续</strong>，
+          失败的那个进入 30 分钟冷却，不会一直撞同一个。</p>
+          <p><strong>关闭后</strong>：只用你选定的那个账号，失败了如实报错，不自动切换。</p>
+          <p class="explain-note">
+            ⚠️ 多账号轮换会让 ToS 风险显著升高（一台机器登多个账号 = 明显异常）。<br />
+            只用自己真实拥有的账号，发现任何一个被限流就立刻停用整个池。
+          </p>
+        </div>
+      </details>
+      <div class="region-tabs" id="regionTabs">
+        <button class="region-tab active" data-region="cn" type="button">
+          国内版 <span class="region-count" id="countCn">0</span>
+        </button>
+        <button class="region-tab" data-region="global" type="button">
+          国际版 <span class="region-count" id="countGlobal">0</span>
+        </button>
+      </div>
+      <div class="account-header">
+        <span>账号</span>
+        <span class="col-credit">积分</span>
+        <span></span>
+      </div>
+      <div class="account-list" id="accountList">
+        <div class="empty">加载中…</div>
+      </div>
+    </section>
+
+    <!-- 模型名册 -->
+    <section class="panel" id="panel-models" hidden>
+      <div class="panel-head">
+        <h2>模型名册</h2>
+        <div class="row">
+          <select id="shimSelect" class="select">
+            <optgroup label="WorkBuddy">
+              <option value="workbuddy">国内版</option>
+              <option value="workbuddy_intl">国际版</option>
+            </optgroup>
+            <optgroup label="Qoder">
+              <option value="qoder">国内版 + 国际版</option>
+            </optgroup>
+            <optgroup label="Trae">
+              <option value="trae">Trae（国内）</option>
+            </optgroup>
+          </select>
+          <button class="btn" id="reloadModels" type="button">重新拉取</button>
+        </div>
+      </div>
+      <p class="hint">
+        按「免费 → 成本 → 延迟」排序。<code>?</code> 表示未实测（可能无权限）。
+        勾选要启用的模型，保存后会重新注册 provider。
+      </p>
+      <div class="qregion-bar" id="qoderRegionBar" hidden>
+        <span class="qregion-label">Qoder 区域：</span>
+        <button class="qregion-btn active" data-qregion="all" type="button">全部</button>
+        <button class="qregion-btn" data-qregion="cn" type="button">国内版</button>
+        <button class="qregion-btn" data-qregion="global" type="button">国际版</button>
+      </div>
+      <div class="model-toolbar">
+        <label><input type="checkbox" id="selectAllModels" /> 全选</label>
+        <span id="modelStats" class="stats"></span>
+        <button class="btn primary" id="saveModels" type="button">保存选择</button>
+      </div>
+      <div class="model-list" id="modelList">
+        <div class="empty">加载中…</div>
+      </div>
+    </section>
+
+    <!-- 耗费 -->
+    <section class="panel" id="panel-cost" hidden>
+      <div class="panel-head">
+        <h2>耗费统计</h2>
+        <div class="row">
+          <select id="costShim" class="select">
+            <optgroup label="WorkBuddy">
+              <option value="workbuddy">国内版</option>
+              <option value="workbuddy_intl">国际版</option>
+            </optgroup>
+            <optgroup label="Qoder">
+              <option value="qoder">Qoder</option>
+            </optgroup>
+            <optgroup label="Trae">
+              <option value="trae">Trae</option>
+            </optgroup>
+            <optgroup label="轮换层">
+              <option value="vision">视觉轮换</option>
+              <option value="llm_pool">LLM 池</option>
+            </optgroup>
+          </select>
+          <button class="btn" id="reloadCost" type="button">刷新</button>
+          <button class="btn danger" id="resetCost" type="button">重置统计</button>
+        </div>
+      </div>
+      <div class="cost-summary" id="costSummary"></div>
+      <div class="cost-list" id="costList">
+        <div class="empty">加载中…</div>
+      </div>
+    </section>
+  </main>
+
+  <!-- 检测/导入弹窗 -->
+  <div class="modal" id="scanModal" hidden>
+    <div class="modal-box wide">
+      <h3>检测本地账号</h3>
+      <p class="hint">
+        自动扫描本机上已有的 WorkBuddy 账号，找到后一键导入。<br />
+        <strong>如果你之前用 dsh-connect-workbuddy 加过账号，这里能直接找到。</strong>
+      </p>
+
+      <div class="scan-status" id="scanStatus">扫描中…</div>
+      <div class="scan-list" id="scanList"></div>
+
+      <details class="manual">
+        <summary>自动扫描没找到？手动指定文件夹</summary>
+        <div class="manual-explain">
+          <p><strong>找什么：</strong>一个叫 <code>workbuddy-vault</code>（或类似名字）的文件夹，
+          里面要有 <code>cn</code> 或 <code>global</code> 子文件夹。</p>
+          <p><strong>长得像这样：</strong></p>
+          <pre class="tree">你的文件夹/
+├── cn/
+│   ├── xxxx.json   ← 国内账号
+│   └── yyyy.json
+└── global/
+    └── zzzz.json   ← 国际账号</pre>
+          <p><strong>怎么找：</strong>在你常用的开发目录里搜索 <code>workbuddy-vault</code>，
+          或者看 dsh-connect-workbuddy 的设置里 DSH_HOME 指向哪。</p>
+        </div>
+        <div class="link-row">
+          <input type="text" id="manualPath" placeholder="粘贴 workbuddy-vault 文件夹的完整路径" />
+          <button class="btn" id="importManual" type="button">导入</button>
+        </div>
+      </details>
+
+      <div class="modal-actions">
+        <button class="btn ghost" id="closeScan" type="button">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 扫码弹窗 -->
+  <div class="modal" id="loginModal" hidden>
+    <div class="modal-box">
+      <h3>扫码添加账号</h3>
+      <p class="hint">用手机 WorkBuddy / CodeBuddy 扫码，或打开下面的链接确认。</p>
+      <div class="qr-wrap">
+        <img id="qrImage" alt="二维码" hidden />
+        <div class="qr-placeholder" id="qrPlaceholder">正在生成…</div>
+      </div>
+      <div class="link-row">
+        <input type="text" id="loginUrl" readonly />
+        <button class="btn" id="copyUrl" type="button">复制</button>
+      </div>
+      <div class="login-status" id="loginStatus">等待扫码…</div>
+      <div class="modal-actions">
+        <button class="btn ghost" id="closeLogin" type="button">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="./app.js"></script>
+</body>
+</html>

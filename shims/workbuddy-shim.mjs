@@ -32,7 +32,7 @@
 import { createServer } from "node:http";
 import { createDecipheriv, createHash, randomUUID } from "node:crypto";
 import { execFile, execFileSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -161,6 +161,10 @@ function recordCost(model, credit, usage) {
   const cur = costStats.byModel[model] || {
     calls: 0, credit: 0, promptTokens: 0, completionTokens: 0, fails: 0,
   };
+  // 记下用的哪个账号，供按账号统计
+  if (cachedCredential && cachedCredential.accountId) {
+    cur.accountId = cachedCredential.accountId;
+  }
   cur.calls += 1;
   cur.credit = Number((cur.credit + (Number(credit) || 0)).toFixed(4));
   if (usage) {
@@ -199,6 +203,885 @@ function flushCost() {
 
 // 每 30 秒落盘一次，避免每次调用都写文件
 setInterval(flushCost, 30000).unref?.();
+
+// ── 余额查询（积分）──────────────────────────────────────────
+//
+// 上游接口：POST {billingBase}/v2/billing/meter/get-user-resource
+// 协议参考 dsh-connect-workbuddy/scripts/probe-credits.mjs（MIT, (c) 2026 LaoDing）
+//
+// 返回的结构（层层嵌套）：
+//   data.Response.Data.Accounts[]  每个积分包一条
+//     CycleCapacitySize      周期总量
+//     CycleCapacityRemain    周期剩余
+//     CycleCapacityUsed      周期已用
+//     CapacityRemain         总量剩余
+//     PackageEndTime         过期时间
+//     PackageName            包名
+
+/** 缓存余额（避免每次请求都打上游）。 */
+const balanceCache = new Map();   // accountId → { at, data }
+const BALANCE_TTL_MS = 5 * 60 * 1000;   // 5 分钟
+
+/**
+ * 查某个账号的积分余额。
+ *
+ * @param {object} cred 凭证（需 accessToken / uid / domain）
+ * @param {boolean} force 忽略缓存
+ * @returns {Promise<object|null>} 余额信息，失败返回 null
+ */
+async function fetchBalance(cred, force = false) {
+  if (!cred || !cred.accessToken) return null;
+
+  const key = cred.accountId || cred.uid || "unknown";
+  const cached = balanceCache.get(key);
+  if (!force && cached && Date.now() - cached.at < BALANCE_TTL_MS) {
+    return cached.data;
+  }
+
+  const domain = cred.domain || "";
+  const isGlobal = domain.includes("workbuddy.ai");
+  const billingBase = isGlobal ? "https://www.workbuddy.ai" : "https://www.codebuddy.cn";
+
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  const fmt = (d) =>
+    d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) +
+    " " + pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
+
+  const headers = {
+    "Authorization": "Bearer " + cred.accessToken,
+    "Accept": "application/json",
+    "Content-Type": "application/json",
+  };
+  if (cred.uid) headers["X-User-Id"] = cred.uid;
+  if (domain) headers["X-Domain"] = domain;
+
+  const body = {
+    PageNumber: 1,
+    PageSize: 100,
+    ProductCode: "p_tcaca",
+    Status: [0, 3],
+    PackageEndTimeRangeBegin: fmt(now),
+    PackageEndTimeRangeEnd: fmt(new Date(now.getTime() + 365 * 101 * 24 * 3600 * 1000)),
+  };
+
+  try {
+    const r = await fetch(billingBase + "/v2/billing/meter/get-user-resource", {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!r.ok) {
+      console.error("[workbuddy-shim] 余额查询 HTTP " + r.status);
+      return null;
+    }
+    const doc = await r.json();
+    const inner = doc?.data?.Response?.Data || {};
+    const accounts = Array.isArray(inner.Accounts) ? inner.Accounts : [];
+
+    // 汇总所有未过期积分包
+    let totalRemain = 0;
+    let totalSize = 0;
+    const packages = [];
+    for (const a of accounts) {
+      const size = a.CycleCapacitySize ?? a.CapacitySize ?? 0;
+      const cycleRemain = a.CycleCapacityRemain ?? 0;
+      const cycleUsed = a.CycleCapacityUsed ?? 0;
+      const capRemain = a.CapacityRemain ?? 0;
+      const remain = size > 0 ? cycleRemain : (cycleRemain > 0 || cycleUsed > 0 ? cycleRemain : capRemain);
+      if (remain <= 0) continue;
+      totalRemain += remain;
+      totalSize += size;
+      packages.push({
+        name: a.PackageName || "",
+        remain,
+        size,
+        used: cycleUsed,
+        endTime: a.PackageEndTime || "",
+      });
+    }
+
+    const result = {
+      credit: Math.round(totalRemain),
+      totalSize: Math.round(totalSize),
+      packages: packages.sort((a, b) => b.remain - a.remain),
+      fetchedAt: new Date().toISOString(),
+      region: isGlobal ? "global" : "cn",
+    };
+
+    balanceCache.set(key, { at: Date.now(), data: result });
+    console.error(
+      "[workbuddy-shim] 余额查询成功：" + result.credit + " 分（" + packages.length + " 个包）"
+    );
+    return result;
+  } catch (e) {
+    console.error("[workbuddy-shim] 余额查询失败: " + String(e).slice(0, 120));
+    return null;
+  }
+}
+
+// ── 多账号 vault ─────────────────────────────────────────────
+//
+// 独立的账号库，放在 <AstrBot data>/plugin_data/astrbot_plugin_shim_connector/vault/
+// 按区域分目录，一个账号一个 JSON 文件（文件名 = accountId）。
+//
+// 为什么不用 ~/.dsh/workbuddy-vault：那是 dsh-connect-workbuddy 的目录，
+// 两个项目写同一份文件会互相覆盖。这里用自己的一份，需要时可通过
+// 导入功能把 dsh 的账号搬过来。
+//
+// 文件格式（兼容 dsh 的 vault 格式，方便互相导入）：
+// {
+//   "version": 1,
+//   "accountId": "...",
+//   "refreshedAtMs": 1234567890,
+//   "auth": { "accessToken": "...", "refreshToken": "...", "expiresAt": ..., "domain": "..." },
+//   "account": { "uid": "...", "nickname": "...", "uin": "..." }
+// }
+
+/** vault 根目录。默认在 shim 同级的 .vault/，可用 WB_VAULT_DIR 覆盖。 */
+const VAULT_DIR = process.env.WB_VAULT_DIR ||
+  join(fileURLToPath(new URL(".", import.meta.url)), ".vault");
+
+/** 一区的 vault 目录。 */
+function vaultDirOf(region) {
+  return join(VAULT_DIR, region);
+}
+
+/** 确保目录存在。 */
+function ensureVaultDir(region) {
+  const d = vaultDirOf(region);
+  try { mkdirSync(d, { recursive: true, mode: 0o700 }); } catch { /* 已存在 */ }
+  return d;
+}
+
+/**
+ * 列出某区所有账号文件。
+ *
+ * @returns {Array<{accountId, file, path}>}
+ */
+function listVaultFiles(region) {
+  const d = vaultDirOf(region);
+  let entries = [];
+  try { entries = readdirSync(d); } catch { return []; }
+  const out = [];
+  for (const name of entries) {
+    if (!/\.json$/.test(name)) continue;
+    if (name.startsWith(".")) continue;
+    out.push({
+      accountId: name.replace(/\.json$/, ""),
+      file: name,
+      path: join(d, name),
+    });
+  }
+  return out;
+}
+
+/** 读一个 vault 文件（容错：坏文件返回 null，不抛）。 */
+function readVaultFile(path) {
+  try {
+    const doc = JSON.parse(readFileSync(path, "utf8").replace(/^\uFEFF/, ""));
+    if (!doc || typeof doc !== "object") return null;
+    const auth = doc.auth || {};
+    const account = doc.account || {};
+    if (typeof auth.accessToken !== "string" || auth.accessToken === "") return null;
+    return {
+      accountId: String(doc.accountId || basename(path).replace(/\.json$/, "")),
+      accessToken: auth.accessToken,
+      refreshToken: typeof auth.refreshToken === "string" ? auth.refreshToken : "",
+      expiresAtMs: normalizeExpiry(auth.expiresAt),
+      refreshExpiresAtMs: normalizeExpiry(auth.refreshExpiresAt),
+      domain: String(auth.domain || ""),
+      uid: String(account.uid || ""),
+      nickname: String(account.nickname || ""),
+      uin: String(account.uin || ""),
+      raw: doc,
+      filePath: path,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** 把各种形态的过期时间统一成毫秒。 */
+function normalizeExpiry(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  // 秒 vs 毫秒
+  return n > 1e12 ? n : n * 1000;
+}
+
+/** 写一个 vault 文件（原子写：先 tmp 再 rename）。 */
+function writeVaultFile(region, account) {
+  const d = ensureVaultDir(region);
+  const accountId = account.accountId;
+  if (!accountId) throw new Error("accountId 不能为空");
+  const target = join(d, accountId + ".json");
+  const tmp = target + ".tmp." + process.pid;
+
+  const doc = {
+    version: 1,
+    accountId,
+    refreshedAtMs: Date.now(),
+    auth: {
+      accessToken: account.accessToken,
+      refreshToken: account.refreshToken || "",
+      expiresAt: Math.floor((account.expiresAtMs || 0) / 1000),
+      refreshExpiresAt: Math.floor((account.refreshExpiresAtMs || 0) / 1000),
+      domain: account.domain || (region === "global" ? "www.workbuddy.ai" : "copilot.tencent.com"),
+    },
+    account: {
+      uid: account.uid || "",
+      nickname: account.nickname || "",
+      uin: account.uin || "",
+    },
+  };
+
+  writeFileSync(tmp, JSON.stringify(doc, null, 2), { encoding: "utf8", mode: 0o600 });
+  renameSync(tmp, target);
+  console.error("[workbuddy-shim] 已写入账号 " + accountId + " 到 " + region + " 区 vault");
+  return target;
+}
+
+/** 删一个 vault 文件。 */
+function deleteVaultFile(region, accountId) {
+  const p = join(vaultDirOf(region), accountId + ".json");
+  try {
+    unlinkSync(p);
+    console.error("[workbuddy-shim] 已删除账号 " + accountId + "（" + region + " 区）");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 列出某区所有账号（含余额，异步）。 */
+async function listVaultAccountsWithBalance(region, withBalance = true) {
+  const base = listVaultAccounts(region);
+  if (!withBalance) return base;
+
+  // 并发查余额
+  const results = await Promise.all(
+    base.map(async (item) => {
+      if (!item.valid) return item;
+      const file = listVaultFiles(region).find((f2) => f2.accountId === item.accountId);
+      if (!file) return item;
+      const a = readVaultFile(file.path);
+      if (!a) return item;
+      const bal = await fetchBalance({
+        accessToken: a.accessToken,
+        uid: a.uid,
+        domain: a.domain,
+        accountId: a.accountId,
+      }).catch(() => null);
+      return {
+        ...item,
+        credit: bal ? bal.credit : null,
+        creditPackages: bal ? bal.packages.length : 0,
+        creditFetchedAt: bal ? bal.fetchedAt : null,
+      };
+    })
+  );
+  return results;
+}
+
+/** 列出某区所有账号（脱敏，供 API 返回）。 */
+function listVaultAccounts(region) {
+  return listVaultFiles(region).map((f) => {
+    const a = readVaultFile(f.path);
+    if (!a) {
+      return {
+        accountId: f.accountId,
+        valid: false,
+        uid: "",
+        nickname: "",
+        uin: "",
+        expiresAtMs: 0,
+        expired: true,
+      };
+    }
+    const now = Date.now();
+    return {
+      accountId: a.accountId,
+      valid: true,
+      uid: a.uid,
+      nickname: a.nickname,
+      uin: a.uin,
+      expiresAtMs: a.expiresAtMs,
+      expired: a.expiresAtMs > 0 && a.expiresAtMs < now,
+      remainingMs: a.expiresAtMs > 0 ? Math.max(0, a.expiresAtMs - now) : null,
+    };
+  });
+}
+
+/**
+ * 从 vault 选一个可用账号。
+ *
+ * 策略：
+ *   1. 优先用上次成功的那个（粘性），避免每次换号导致上下文不一致
+ *   2. 它失效/过期时才换下一个
+ *   3. 都没有就退回桌面端凭据（原逻辑）
+ *
+ * @param {string} region 区域
+ * @param {string} preferAccountId 优先账号（可选）
+ * @returns {object|null} 凭证对象，或 null 表示用桌面端
+ */
+let stickyAccountId = null;
+
+/** 因额度用尽被临时跳过的账号：accountId → 跳过到什么时候。 */
+const accountCooldown = new Map();
+
+function pickVaultAccount(region, preferAccountId) {
+  const files = listVaultFiles(region);
+  if (files.length === 0) return null;
+
+  const now = Date.now();
+  const candidates = [];
+
+  for (const f of files) {
+    const a = readVaultFile(f.path);
+    if (!a) continue;
+    // 过期不算可用（留 5 分钟余量）
+    if (a.expiresAtMs > 0 && a.expiresAtMs - now < 300000) continue;
+    // 额度冷却中跳过
+    const cool = accountCooldown.get(a.accountId) || 0;
+    if (cool > now) continue;
+    candidates.push(a);
+  }
+
+  if (candidates.length === 0) {
+    // 全在冷却 → 清空冷却重试（避免永久卡死）
+    if (accountCooldown.size > 0) {
+      console.error("[workbuddy-shim] 所有 vault 账号都在冷却，清空重试");
+      accountCooldown.clear();
+      return pickVaultAccount(region, preferAccountId);
+    }
+    return null;
+  }
+
+  const want = preferAccountId || stickyAccountId;
+  if (want) {
+    const hit = candidates.find((a) => a.accountId === want);
+    if (hit) return hit;
+  }
+  stickyAccountId = candidates[0].accountId;
+  return candidates[0];
+}
+
+/**
+ * 标记某账号进入冷却（额度用尽时调用）。
+ *
+ * @param {string} accountId
+ * @param {number} minutes 冷却分钟数
+ */
+function coolDownAccount(accountId, minutes = 30) {
+  if (!accountId) return;
+  accountCooldown.set(accountId, Date.now() + minutes * 60000);
+  // 如果当前粘性的就是它，清掉，让下次选别的
+  if (stickyAccountId === accountId) stickyAccountId = null;
+  cachedCredential = null;
+  console.error(
+    "[workbuddy-shim] 账号 " + accountId.slice(0, 12) + " 进入冷却 " + minutes + " 分钟"
+  );
+}
+
+// ── 扫码登录（OAuth QR sign-in）──────────────────────────────
+//
+// 协议复刻自 dsh-connect-workbuddy/src/oauth.ts（MIT, Copyright (c) 2026 LaoDing），
+// 只保留取凭据所必需的三步，UI 部分由 AstrBot 的 pages 承担。
+//
+// 流程：
+//   1. POST {base}/v2/plugin/auth/state?platform=workbuddy
+//        → 拿到 state + authUrl（用户在浏览器打开这个 URL 扫码/确认）
+//   2. 轮询 GET {base}/v2/plugin/auth/token?state={state}
+//        → code=0/200 且带 accessToken 即成功
+//   3. GET {base}/v2/plugin/login/account  （带 Bearer）
+//        → 拿 uid / nickname / uin
+//   4. 写入 vault
+//
+// 会话只在进程内存（loginSessions），进程重启即取消 —— 和参考实现一致。
+
+/** 上游插件 API 前缀。 */
+const OAUTH_API_PREFIX = "/v2/plugin";
+
+/** 登录会话有效期（秒）。 */
+const OAUTH_TIMEOUT_SECONDS = 600;
+
+/** 内存里的登录会话：loginId → session。 */
+const loginSessions = new Map();
+
+/** 某区发起登录用的 base。 */
+function oauthBaseOf(region) {
+  if (region === "global") return process.env.WB_GLOBAL_BASE || "https://www.workbuddy.ai";
+  return process.env.WB_CN_BASE || "https://www.codebuddy.cn";
+}
+
+/** 读 JSON，非 JSON 返回 undefined。 */
+async function readJsonSafe(resp) {
+  try {
+    const text = await resp.text();
+    const parsed = JSON.parse(text);
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) return parsed;
+  } catch { /* fall through */ }
+  return undefined;
+}
+
+/** 取信封里的 data 对象。 */
+function envelopeData(doc) {
+  const d = doc && doc.data;
+  return typeof d === "object" && d !== null && !Array.isArray(d) ? d : {};
+}
+
+/** 多个可能的 key 取第一个非空字符串。 */
+function firstString(src, keys) {
+  for (const k of keys) {
+    const v = src[k];
+    if (typeof v === "string" && v.trim() !== "") return v.trim();
+    if (typeof v === "number" && Number.isFinite(v)) return String(v);
+  }
+  return "";
+}
+
+/** 过期时间：绝对时间戳（秒/毫秒）或相对 TTL（秒）。 */
+function expiryOf(src, absKeys, ttlKeys) {
+  for (const k of absKeys) {
+    const v = src[k];
+    const n = typeof v === "number" ? v : Number(v);
+    if (Number.isFinite(n) && n > 0) return n > 1e12 ? n : n * 1000;
+  }
+  for (const k of ttlKeys) {
+    const n = Number(src[k]);
+    if (Number.isFinite(n) && n > 0) return Date.now() + n * 1000;
+  }
+  return 0;
+}
+
+// ── 导入外部凭据（dsh vault + 桌面端）────────────────────────
+//
+// 用户本地可能已经有账号：
+//   1. dsh-connect-workbuddy 的 vault（~/.dsh/workbuddy-vault/）
+//   2. WorkBuddy 桌面端的 auth 文件（CodeBuddyExtension/.../auth/）
+//
+// 这个函数把它们全部搬进我们的 vault，之后统一走 vault 选号逻辑。
+
+/**
+ * dsh vault 的可能位置（按优先级）。
+ *
+ * 只认**环境变量**和**用户主目录**下的默认位置，不猜具体盘符。
+ *
+ * 支持的来源：
+ *   1. DSH_HOME 环境变量（dsh 官方约定）
+ *   2. WB_DSH_VAULT 环境变量（本插件专用，可直接指向 vault 目录）
+ *   3. ~/.dsh/workbuddy-vault（默认）
+ *   4. Windows 上额外试 %USERPROFILE%/.dsh/workbuddy-vault（已在 3 覆盖）
+ *
+ * 如果 vault 在别处，用户需要设 DSH_HOME 或 WB_DSH_VAULT。
+ */
+/**
+ * 生成 dsh vault 的**候选位置**（不检查是否存在）。
+ *
+ * 用于：
+ *   1. 自动检测（逐个检查存在性）
+ *   2. 给用户看「我找过这些地方」，方便手动指定
+ *
+ * 不写死任何具体盘符 —— 用环境变量和用户目录推导。
+ */
+function dshVaultCandidates() {
+  const h = homedir();
+  const out = [];
+  const seen = new Set();
+
+  const push = (p, why) => {
+    if (!p) return;
+    const k = p.toLowerCase().replace(/[\\/]+$/, "");
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.push({ path: p, why });
+  };
+
+  // 1) 环境变量（最可靠）
+  if (process.env.WB_DSH_VAULT) {
+    push(process.env.WB_DSH_VAULT, "环境变量 WB_DSH_VAULT");
+  }
+  const dshHomeEnv = (process.env.DSH_HOME || "").trim();
+  if (dshHomeEnv !== "") {
+    push(join(dshHomeEnv, "workbuddy-vault"), "环境变量 DSH_HOME");
+    push(join(dshHomeEnv, "vault"), "环境变量 DSH_HOME（备选名）");
+  }
+
+  // 2) 用户主目录
+  push(join(h, ".dsh", "workbuddy-vault"), "默认位置 ~/.dsh/workbuddy-vault");
+
+  // 3) 常见自定义开发目录（相对主目录，不假设具体盘符）
+  push(join(h, "dev", "dsh-home", "workbuddy-vault"), "~/dev/dsh-home 下的 vault");
+  push(join(h, "dsh-home", "workbuddy-vault"), "~/dsh-home 下的 vault");
+
+  // 4) Windows：遍历已有盘符，探测 <盘>/dev/dsh-home 与 <盘>/dsh-home
+  //    只作为候选列出，不假设一定存在
+  if (process.platform === "win32") {
+    const drives = [];
+    for (const letter of "CDEFGHIJ".split("")) {
+      try {
+        if (existsSync(letter + ":\\")) drives.push(letter + ":");
+      } catch { /* skip */ }
+    }
+    for (const d of drives) {
+      push(join(d + "\\", "dev", "dsh-home", "workbuddy-vault"), d + " 盘的 dev/dsh-home");
+      push(join(d + "\\", "dsh-home", "workbuddy-vault"), d + " 盘的 dsh-home");
+    }
+  }
+
+  return out;
+}
+
+/** 只返回实际存在的 vault 目录。 */
+function dshVaultDirs() {
+  return dshVaultCandidates()
+    .filter((x) => {
+      try { return existsSync(x.path); } catch { return false; }
+    })
+    .map((x) => x.path);
+}
+
+/**
+ * 探测报告：所有候选位置 + 是否存在 + 里面有几个账号。
+ *
+ * 供 /accounts/scan 接口返回，前端展示「我找过哪些地方」。
+ */
+function scanVaultLocations() {
+  const candidates = dshVaultCandidates();
+  return candidates.map((x) => {
+    let exists = false;
+    let accountCount = 0;
+    let regions = {};
+    try {
+      exists = existsSync(x.path);
+      if (exists) {
+        for (const region of ["cn", "global"]) {
+          const rd = join(x.path, region);
+          if (!existsSync(rd)) continue;
+          let files = [];
+          try { files = readdirSync(rd); } catch { continue; }
+          const n = files.filter((f) => /\.json$/.test(f)).length;
+          if (n > 0) {
+            regions[region] = n;
+            accountCount += n;
+          }
+        }
+      }
+    } catch { /* ignore */ }
+    return {
+      path: x.path,
+      why: x.why,
+      exists,
+      accountCount,
+      regions,
+      // 已导入到我们 vault 的数量（去重后）
+      imported: exists && accountCount > 0,
+    };
+  });
+}
+
+/** 向后兼容：返回第一个存在的。 */
+function dshVaultDir() {
+  const all = dshVaultDirs();
+  return all.length > 0 ? all[0] : join(homedir(), ".dsh", "workbuddy-vault");
+}
+
+/**
+ * 从 dsh vault 导入账号（明文 token，直接可读）。
+ *
+ * @param {boolean} dryRun 只报告不写入
+ * @returns {Promise<{imported, skipped, errors, details}>}
+ */
+async function importFromDshVault(dryRun = false, explicitPath = "") {
+  // explicitPath 非空时只用它（手动指定），否则自动扫描
+  const roots = explicitPath ? [explicitPath] : dshVaultDirs();
+  const result = { imported: 0, skipped: 0, errors: [], details: [], sources: roots };
+
+  if (explicitPath && !existsSync(explicitPath)) {
+    result.errors.push("指定的路径不存在: " + explicitPath);
+    return result;
+  }
+
+  if (roots.length === 0) {
+    result.errors.push("没找到 dsh vault 目录。可用 DSH_HOME 或 WB_DSH_VAULT 环境变量指定");
+    return result;
+  }
+
+  console.error("[workbuddy-shim] 找到 " + roots.length + " 个 dsh vault: " + roots.join(", "));
+
+  for (const root of roots) {
+  for (const region of ["cn", "global"]) {
+    const dir = join(root, region);
+    if (!existsSync(dir)) continue;
+
+    let entries = [];
+    try { entries = readdirSync(dir); } catch { continue; }
+
+    for (const name of entries) {
+      if (!/\.json$/.test(name)) continue;
+      const p = join(dir, name);
+      const a = readVaultFile(p);
+      if (!a) {
+        result.errors.push("解析失败: " + name);
+        continue;
+      }
+      // 已存在同 uid 的就跳过
+      const existing = listVaultFiles(region)
+        .map((x) => readVaultFile(x.path))
+        .filter(Boolean);
+      if (existing.some((x) => x.uid === a.uid && a.uid !== "")) {
+        result.skipped += 1;
+        result.details.push({ region, accountId: a.accountId, action: "skip", reason: "已存在" });
+        continue;
+      }
+      if (!dryRun) {
+        writeVaultFile(region, {
+          accountId: a.accountId,
+          accessToken: a.accessToken,
+          refreshToken: a.refreshToken,
+          expiresAtMs: a.expiresAtMs,
+          refreshExpiresAtMs: a.refreshExpiresAtMs,
+          domain: a.domain,
+          uid: a.uid,
+          nickname: a.nickname,
+          uin: a.uin,
+        });
+      }
+      result.imported += 1;
+      result.details.push({
+        region,
+        accountId: a.accountId,
+        nickname: a.nickname,
+        uid: a.uid,
+        action: dryRun ? "would-import" : "imported",
+      });
+    }
+  }
+  }  // for (const root of roots)
+  return result;
+}
+
+/**
+ * 从桌面端 auth 文件导入（token 是加密的，需要 at-rest 密钥）。
+ *
+ * @param {boolean} dryRun
+ * @returns {Promise<{imported, skipped, errors, details}>}
+ */
+async function importFromDesktop(dryRun = false) {
+  const result = { imported: 0, skipped: 0, errors: [], details: [] };
+
+  let key;
+  try {
+    key = await readAtRestKey();
+  } catch (e) {
+    result.errors.push("拿不到 at-rest 密钥（桌面端可能没安装）: " + String(e).slice(0, 100));
+    return result;
+  }
+  if (key === undefined) {
+    result.errors.push("桌面端凭据是加密的，但没有可用的 at-rest 密钥");
+    return result;
+  }
+
+  const dirs = defaultDesktopAuthDirs();
+  for (const dir of dirs) {
+    if (!existsSync(dir)) continue;
+    let entries = [];
+    try { entries = readdirSync(dir); } catch { continue; }
+
+    for (const name of entries) {
+      if (!/^workbuddy-desktop(-[\w-]+)?(\.[\w-]+)?\.info$/.test(name)) continue;
+      if (name.includes(".observation.") || name.endsWith(".tmp")) continue;
+
+      const p = join(dir, name);
+      let text;
+      try { text = readFileSync(p, "utf8"); } catch { continue; }
+
+      const cred = parseWorkBuddyAuth(text, key);
+      if (!cred || !cred.accessToken) {
+        result.errors.push("解密失败: " + name);
+        continue;
+      }
+
+      // 判断区域
+      const region = (cred.domain || "").includes("workbuddy.ai") ? "global" : "cn";
+      const uid = cred.uid || "";
+      const accountId = uid !== "" ? uid.replace(/-/g, "").slice(0, 24) : randomUUID().replace(/-/g, "").slice(0, 24);
+
+      const existing = listVaultFiles(region)
+        .map((x) => readVaultFile(x.path))
+        .filter(Boolean);
+      if (existing.some((x) => x.uid === uid && uid !== "")) {
+        result.skipped += 1;
+        result.details.push({ region, accountId, action: "skip", reason: "已存在" });
+        continue;
+      }
+
+      if (!dryRun) {
+        writeVaultFile(region, {
+          accountId,
+          accessToken: cred.accessToken,
+          refreshToken: cred.refreshToken || "",
+          expiresAtMs: Number(cred.expiresAtMs || 0),
+          refreshExpiresAtMs: 0,
+          domain: cred.domain || (region === "global" ? "www.workbuddy.ai" : "copilot.tencent.com"),
+          uid,
+          nickname: "",
+          uin: "",
+        });
+      }
+      result.imported += 1;
+      result.details.push({ region, accountId, uid, action: dryRun ? "would-import" : "imported" });
+    }
+  }
+  return result;
+}
+
+/** 一次性导入所有外部凭据。 */
+async function importAllExternal(dryRun = false, explicitPath = "") {
+  const dsh = await importFromDshVault(dryRun, explicitPath);
+  const desktop = await importFromDesktop(dryRun);
+  return {
+    dryRun,
+    dshVault: dsh,
+    desktop,
+    total: {
+      imported: dsh.imported + desktop.imported,
+      skipped: dsh.skipped + desktop.skipped,
+    },
+    errors: [...dsh.errors, ...desktop.errors],
+  };
+}
+
+/**
+ * 发起一次扫码登录。
+ *
+ * @param {string} region "cn" | "global"
+ * @returns {Promise<{loginId, verificationUri, expiresIn} | {error}>}
+ */
+async function oauthStart(region) {
+  const base = oauthBaseOf(region).replace(/\/+$/, "");
+  let resp;
+  try {
+    resp = await fetch(base + OAUTH_API_PREFIX + "/auth/state?platform=workbuddy", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: "{}",
+      signal: AbortSignal.timeout(30000),
+    });
+  } catch (e) {
+    return { error: "连不上 " + base + "：" + String(e).slice(0, 120) };
+  }
+  const doc = await readJsonSafe(resp);
+  if (doc === undefined) {
+    return { error: "登录服务返回了非 JSON（HTTP " + resp.status + "）" };
+  }
+  const data = envelopeData(doc);
+  const state = firstString(data, ["state", "State"]);
+  if (state === "") {
+    return { error: "登录服务没有下发 state（HTTP " + resp.status + "）" };
+  }
+  const authUrl = firstString(data, ["authUrl", "auth_url", "url", "Url"])
+    || base + "/login?state=" + encodeURIComponent(state);
+
+  const loginId = "wb_" + randomUUID().replace(/-/g, "");
+  loginSessions.set(loginId, {
+    region,
+    base,
+    state,
+    expiresAtMs: Date.now() + OAUTH_TIMEOUT_SECONDS * 1000,
+    done: false,
+  });
+  console.error("[workbuddy-shim] 发起登录 " + loginId + "（" + region + " 区）");
+  return { loginId, verificationUri: authUrl, expiresIn: OAUTH_TIMEOUT_SECONDS };
+}
+
+/**
+ * 轮询一次登录结果。
+ *
+ * @param {string} loginId
+ * @returns {Promise<{done:false} | {done:true, account} | {done:true, error}>}
+ */
+async function oauthPoll(loginId) {
+  const s = loginSessions.get(loginId);
+  if (!s) return { done: true, error: "登录会话不存在，请重新发起" };
+  if (s.done) return { done: true, error: s.error || "登录已结束" };
+  if (Date.now() > s.expiresAtMs) {
+    s.done = true;
+    loginSessions.delete(loginId);
+    return { done: true, error: "登录超时，请重新发起" };
+  }
+
+  let resp;
+  try {
+    resp = await fetch(
+      s.base + OAUTH_API_PREFIX + "/auth/token?state=" + encodeURIComponent(s.state),
+      { method: "GET", headers: { Accept: "application/json" }, signal: AbortSignal.timeout(30000) },
+    );
+  } catch {
+    // 网络抖动不算失败，用户可能还在扫码
+    return { done: false };
+  }
+  const doc = await readJsonSafe(resp);
+  if (doc === undefined) return { done: false };
+
+  const code = typeof doc.code === "number" ? doc.code : -1;
+  if (code !== 0 && code !== 200) return { done: false };
+
+  const data = envelopeData(doc);
+  const accessToken = firstString(data, ["accessToken", "access_token", "AccessToken"]);
+  if (accessToken === "") return { done: false };
+
+  // 成功：补账号资料
+  const domain = firstString(data, ["domain", "Domain"]);
+  const headers = { Authorization: "Bearer " + accessToken, Accept: "application/json" };
+  if (domain !== "") headers["X-Domain"] = domain;
+
+  let profile = {};
+  try {
+    const pr = await fetch(s.base + OAUTH_API_PREFIX + "/login/account", {
+      method: "GET", headers, signal: AbortSignal.timeout(30000),
+    });
+    const pd = await readJsonSafe(pr);
+    if (pd !== undefined) profile = envelopeData(pd);
+  } catch { /* 资料是展示用，拿不到不影响登录 */ }
+
+  const uid = firstString(profile, ["uid", "Uid", "userId", "UserID"]);
+  const nickname = firstString(profile, ["nickname", "NickName", "ScreenName"]);
+  const uin = firstString(profile, ["uin", "Uin"]);
+  const refreshToken = firstString(data, ["refreshToken", "refresh_token", "RefreshToken"]);
+  const expiresAtMs = expiryOf(data, ["expiresAt", "expires_at"], ["expiresIn", "expires_in"]);
+  const refreshExpiresAtMs = expiryOf(data, ["refreshExpiresAt", "refresh_expires_at"], ["refreshExpiresIn", "refresh_expires_in"]);
+
+  // accountId：优先用 uid（稳定），没 uid 就用随机串
+  const accountId = uid !== "" ? uid.replace(/-/g, "").slice(0, 24) : randomUUID().replace(/-/g, "").slice(0, 24);
+
+  const account = {
+    accountId,
+    accessToken,
+    refreshToken,
+    expiresAtMs,
+    refreshExpiresAtMs,
+    domain: domain || (s.region === "global" ? "www.workbuddy.ai" : "copilot.tencent.com"),
+    uid,
+    nickname,
+    uin,
+  };
+
+  try {
+    writeVaultFile(s.region, account);
+  } catch (e) {
+    s.done = true;
+    loginSessions.delete(loginId);
+    return { done: true, error: "登录成功但写入 vault 失败：" + String(e).slice(0, 150) };
+  }
+
+  s.done = true;
+  loginSessions.delete(loginId);
+  console.error("[workbuddy-shim] 登录成功：" + (nickname || uid || accountId) + "（" + s.region + " 区）");
+  return { done: true, account };
+}
 
 // ── 上游模型名册（/v3/config）────────────────────────────────
 //
@@ -718,6 +1601,26 @@ let peerCredAt = 0;
 async function resolvePeerCredential() {
   if (peerCredCache && Date.now() - peerCredAt < 300000) return peerCredCache;
 
+  // ① 对端区的 vault 账号优先
+  try {
+    const v = pickVaultAccount(PEER_REGION);
+    if (v) {
+      peerCredCache = {
+        accessToken: v.accessToken,
+        refreshToken: v.refreshToken,
+        expiresAtMs: v.expiresAtMs,
+        domain: v.domain || (PEER_REGION === "global" ? "www.workbuddy.ai" : "copilot.tencent.com"),
+        uid: v.uid,
+        accountId: v.accountId,
+        source: "vault",
+      };
+      peerCredAt = Date.now();
+      console.error("[workbuddy-shim] 跨区兜底：用 vault 里的 " + PEER_REGION + " 区账号");
+      return peerCredCache;
+    }
+  } catch { /* 退回桌面端 */ }
+
+  // ② 退回桌面端凭据
   const home = homedir();
   const local = process.env.LOCALAPPDATA || join(home, "AppData", "Local");
   const roaming = process.env.APPDATA || join(home, "AppData", "Roaming");
@@ -766,6 +1669,27 @@ async function resolveCredential() {
     if (!exp || exp - Date.now() > 300000) return cachedCredential;
   }
 
+  // ① 优先用 vault 里的账号（扫码登录添加的）
+  //    多个账号时按 stickyAccountId 保持粘性，避免每次换号
+  try {
+    const v = pickVaultAccount(REGION);
+    if (v) {
+      cachedCredential = {
+        accessToken: v.accessToken,
+        refreshToken: v.refreshToken,
+        expiresAtMs: v.expiresAtMs,
+        domain: v.domain || (REGION === "global" ? "www.workbuddy.ai" : "copilot.tencent.com"),
+        uid: v.uid,
+        accountId: v.accountId,
+        source: "vault",
+      };
+      return cachedCredential;
+    }
+  } catch (e) {
+    console.error("[workbuddy-shim] 读 vault 失败，退回桌面端凭据: " + String(e).slice(0, 100));
+  }
+
+  // ② vault 没有可用账号，退回桌面端凭据（原有逻辑）
   const dirs = defaultDesktopAuthDirs();
   const files = [];
   for (const dir of dirs) {
@@ -1030,8 +1954,23 @@ function aggregateSse(text, model) {
     if (choice.finish_reason) finishReason = choice.finish_reason;
   }
 
-  const message = { role: "assistant", content: content || null };
+  // content 为空但 reasoning 有值时，用 reasoning 顶替 content。
+  //
+  // 起因（2026-11-05）：hy4-preview 这类推理模型只吐 reasoning_content，
+  // content 恒为 null。下游（AstrBot）只读 content，就会认为「模型返回空」，
+  // 白白用掉一次 fallback 重试。
+  //
+  // 注意：reasoning_content 仍然保留，能区分出"这句是思考过程"的客户端不受影响。
+  let finalContent = content;
+  let contentFromReasoning = false;
+  if ((finalContent === "" || finalContent === null || finalContent === undefined) && reasoning) {
+    finalContent = reasoning;
+    contentFromReasoning = true;
+  }
+
+  const message = { role: "assistant", content: finalContent || null };
   if (reasoning) message.reasoning_content = reasoning;
+  if (contentFromReasoning) message._content_from_reasoning = true;
   if (toolCalls.size > 0) {
     message.tool_calls = [...toolCalls.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v);
     if (!message.content) delete message.content;
@@ -1102,6 +2041,83 @@ async function handleChat(req, res) {
 
   if (!upstream.ok) {
     const t = (await upstream.text()).slice(0, 800);
+
+    // ── 换账号重试（同区内）──
+    // 额度用尽时，先在本区换下一个 vault 账号试试，再考虑跨区。
+    // 顺序：本区换号 → 跨区换号 → 放弃
+    if (isQuotaError(t) && credential && credential.accountId) {
+      coolDownAccount(credential.accountId, 30);
+      console.error(
+        "[workbuddy-shim] " + model + " 额度问题，尝试同区换号重试"
+      );
+      try {
+        const next = pickVaultAccount(REGION);
+        if (next && next.accountId !== credential.accountId) {
+          const nextHeaders = buildHeaders({
+            ...next,
+            domain: next.domain || (REGION === "global" ? "www.workbuddy.ai" : "copilot.tencent.com"),
+          });
+          const retryRes = await fetch(CHAT_BASE + "/v2/chat/completions", {
+            method: "POST",
+            headers: nextHeaders,
+            body: prepared,
+            redirect: "error",
+            signal: AbortSignal.any([controller.signal, AbortSignal.timeout(180000)]),
+          });
+          if (retryRes.ok) {
+            console.error(
+              "[workbuddy-shim] " + model + " 换号成功（" + next.accountId.slice(0, 12) + "）"
+            );
+            cachedCredential = {
+              accessToken: next.accessToken,
+              refreshToken: next.refreshToken,
+              expiresAtMs: next.expiresAtMs,
+              domain: next.domain,
+              uid: next.uid,
+              accountId: next.accountId,
+              source: "vault",
+            };
+            if (streamDown) {
+              res.writeHead(200, {
+                "Content-Type": "text/event-stream; charset=utf-8",
+                "Cache-Control": "no-cache",
+                Connection: "keep-alive",
+                "X-WB-Account": next.accountId.slice(0, 12),
+                "X-WB-Fallback": "account-switch",
+              });
+              const reader = retryRes.body.getReader();
+              try {
+                while (true) {
+                  const { done, value } = await reader.read();
+                  if (done) break;
+                  res.write(Buffer.from(value));
+                }
+              } catch { /* client gone */ }
+              res.end();
+              return;
+            }
+            const retryText = await retryRes.text();
+            const retryOut = aggregateSse(retryText, model);
+            if (retryOut && retryOut.usage) {
+              recordCost(model, retryOut.usage.credit, retryOut.usage);
+              flushCost();
+            }
+            res.setHeader("X-WB-Account", next.accountId.slice(0, 12));
+            res.setHeader("X-WB-Fallback", "account-switch");
+            sendJson(res, 200, retryOut);
+            return;
+          }
+          const retryErr = (await retryRes.text()).slice(0, 200);
+          console.error("[workbuddy-shim] 换号也失败: " + retryErr);
+          // 换的号也不行 → 也冷却
+          if (isQuotaError(retryErr)) coolDownAccount(next.accountId, 30);
+        } else {
+          console.error("[workbuddy-shim] 同区没有其他可用账号");
+        }
+      } catch (e) {
+        console.error("[workbuddy-shim] 换号重试异常: " + String(e).slice(0, 120));
+      }
+    }
 
     // ── 跨区兜底 ──
     // 额度用尽（14018）或余额不足（1113）时，试试对端区的同一个模型。
@@ -1274,6 +2290,318 @@ const server = createServer((req, res) => {
     return;
   }
 
+  // ── 账号管理 ──────────────────────────────────────────────
+
+  // 当前正在用的账号
+  if (req.method === "GET" && (url === "/accounts/current" || url.startsWith("/accounts/current?"))) {
+    (async () => {
+      const cred = await resolveCredential().catch(() => null);
+      const now = Date.now();
+      const cooling = [];
+      for (const [id, until] of accountCooldown.entries()) {
+        if (until > now) cooling.push({ accountId: id, untilMs: until, remainMin: Math.round((until-now)/60000) });
+      }
+      sendJson(res, 200, {
+        ok: true,
+        region: REGION,
+        current: cred ? {
+          accountId: cred.accountId || "(desktop)",
+          uid: cred.uid || "",
+          source: cred.source || "desktop",
+          expiresAtMs: cred.expiresAtMs || 0,
+        } : null,
+        sticky: stickyAccountId,
+        cooling,
+      });
+    })().catch((e) => {
+      if (!res.headersSent) sendError(res, 500, String(e), "internal");
+    });
+    return;
+  }
+
+  // 导入外部凭据（dsh vault + 桌面端）
+  if (req.method === "POST" && (url === "/accounts/import" || url.startsWith("/accounts/import?"))) {
+    (async () => {
+      let body = {};
+      try {
+        const raw = (await readBody(req)).toString("utf8");
+        if (raw.trim() !== "") body = JSON.parse(raw);
+      } catch { /* ignore */ }
+      const dryRun = body.dryRun === true;
+      const source = String(body.source || "all");  // all | dsh | desktop
+      const explicitPath = String(body.path || "").trim();  // 手动指定的 vault 路径
+
+      let result;
+      if (source === "dsh") result = { dshVault: await importFromDshVault(dryRun, explicitPath) };
+      else if (source === "desktop") result = { desktop: await importFromDesktop(dryRun) };
+      else result = await importAllExternal(dryRun, explicitPath);
+
+      console.error(
+        "[workbuddy-shim] 导入外部凭据" + (dryRun ? "（试运行）" : "") + ": " +
+        JSON.stringify(result.total || {})
+      );
+      sendJson(res, 200, { ok: true, ...result });
+    })().catch((e) => {
+      if (!res.headersSent) sendError(res, 500, String(e), "internal");
+    });
+    return;
+  }
+
+  // 扫描 vault 候选位置（告诉用户找过哪些地方）
+  if (req.method === "GET" && (url === "/accounts/scan" || url.startsWith("/accounts/scan?"))) {
+    sendJson(res, 200, {
+      ok: true,
+      candidates: scanVaultLocations(),
+      vaultDir: VAULT_DIR,
+      hint: "自动扫描只覆盖常见位置。如果你的 vault 在别处，用「手动指定路径」或设 DSH_HOME / WB_DSH_VAULT 环境变量。",
+    });
+    return;
+  }
+
+  // 列出某区所有账号
+  if (req.method === "GET" && (url === "/accounts" || url.startsWith("/accounts?"))) {
+    (async () => {
+      const region = /[?&]region=(global|cn)\b/.exec(url)?.[1] || REGION;
+      // ?balance=0 可跳过余额查询（更快）
+      const withBalance = !/[?&]balance=0\b/.test(url);
+      const accounts = await listVaultAccountsWithBalance(region, withBalance);
+      sendJson(res, 200, {
+        ok: true,
+        region,
+        vaultDir: vaultDirOf(region),
+        accounts,
+      });
+    })().catch((e) => {
+      if (!res.headersSent) sendError(res, 500, String(e), "internal");
+    });
+    return;
+  }
+
+  // 发起扫码登录
+  if (req.method === "POST" && (url === "/login/start" || url.startsWith("/login/start?"))) {
+    (async () => {
+      let body = {};
+      try {
+        const raw = (await readBody(req)).toString("utf8");
+        if (raw.trim() !== "") body = JSON.parse(raw);
+      } catch { /* 空 body 也行 */ }
+      const region = String(body.region || (/[?&]region=(global|cn)\b/.exec(url)?.[1]) || REGION);
+      if (region !== "cn" && region !== "global") {
+        sendError(res, 400, "region 只能是 cn 或 global", "bad_region");
+        return;
+      }
+      const r = await oauthStart(region);
+      if (r.error) sendError(res, 502, r.error, "login_start_failed");
+      else sendJson(res, 200, { ok: true, ...r });
+    })().catch((e) => {
+      if (!res.headersSent) sendError(res, 500, String(e), "internal");
+    });
+    return;
+  }
+
+  // 轮询登录结果
+  if (req.method === "GET" && (url === "/login/poll" || url.startsWith("/login/poll?"))) {
+    (async () => {
+      const loginId = /[?&]loginId=([^&]+)/.exec(url)?.[1];
+      if (!loginId) {
+        sendError(res, 400, "缺少 loginId 参数", "bad_request");
+        return;
+      }
+      const r = await oauthPoll(decodeURIComponent(loginId));
+      if (r.done && r.account) {
+        sendJson(res, 200, {
+          ok: true,
+          done: true,
+          account: {
+            accountId: r.account.accountId,
+            uid: r.account.uid,
+            nickname: r.account.nickname,
+            uin: r.account.uin,
+            expiresAtMs: r.account.expiresAtMs,
+          },
+        });
+      } else if (r.done) {
+        sendJson(res, 200, { ok: false, done: true, error: r.error || "登录失败" });
+      } else {
+        sendJson(res, 200, { ok: true, done: false });
+      }
+    })().catch((e) => {
+      if (!res.headersSent) sendError(res, 500, String(e), "internal");
+    });
+    return;
+  }
+
+  // 删除账号
+  if (req.method === "POST" && (url === "/accounts/delete" || url.startsWith("/accounts/delete?"))) {
+    (async () => {
+      let body = {};
+      try {
+        const raw = (await readBody(req)).toString("utf8");
+        if (raw.trim() !== "") body = JSON.parse(raw);
+      } catch { /* ignore */ }
+      const region = String(body.region || REGION);
+      const accountId = String(body.accountId || "");
+      if (!accountId) {
+        sendError(res, 400, "缺少 accountId", "bad_request");
+        return;
+      }
+      const ok = deleteVaultFile(region, accountId);
+      if (ok && stickyAccountId === accountId) stickyAccountId = null;
+      sendJson(res, 200, { ok, region, accountId });
+    })().catch((e) => {
+      if (!res.headersSent) sendError(res, 500, String(e), "internal");
+    });
+    return;
+  }
+
+  // 测试某个账号是否可用
+  if (req.method === "POST" && (url === "/accounts/test" || url.startsWith("/accounts/test?"))) {
+    (async () => {
+      let body = {};
+      try {
+        const raw = (await readBody(req)).toString("utf8");
+        if (raw.trim() !== "") body = JSON.parse(raw);
+      } catch { /* ignore */ }
+
+      const accountId = String(body.accountId || "");
+      const region = String(body.region || REGION);
+      if (!accountId) {
+        sendError(res, 400, "缺少 accountId", "bad_request");
+        return;
+      }
+
+      const file = listVaultFiles(region).find((x) => x.accountId === accountId);
+      if (!file) {
+        sendError(res, 404, "账号不存在: " + accountId, "not_found");
+        return;
+      }
+      const acc = readVaultFile(file.path);
+      if (!acc) {
+        sendError(res, 400, "账号文件损坏", "bad_file");
+        return;
+      }
+
+      // 用该账号发一个最小请求
+      const testModel = String(body.model || "hy3");
+      const chatBase = region === "global" ? "https://www.workbuddy.ai" : "https://copilot.tencent.com";
+      const cred = {
+        accessToken: acc.accessToken,
+        domain: acc.domain || (region === "global" ? "www.workbuddy.ai" : "copilot.tencent.com"),
+        uid: acc.uid,
+        accountId: acc.accountId,
+      };
+
+      const started = Date.now();
+      let ok = false;
+      let message = "";
+      let model = testModel;
+      let latencyMs = null;
+
+      try {
+        const payload = JSON.stringify({
+          model: testModel,
+          messages: [
+            { role: "system", content: "You are a helpful assistant." },
+            { role: "user", content: "hi" },
+          ],
+          max_tokens: 16,
+          stream: true,
+        });
+        const r = await fetch(chatBase + "/v2/chat/completions", {
+          method: "POST",
+          headers: buildHeaders(cred),
+          body: payload,
+          signal: AbortSignal.timeout(45000),
+        });
+        latencyMs = Date.now() - started;
+        const t = await r.text();
+
+        if (r.ok) {
+          // 非流式响应也可能直接给 JSON
+          let content = "";
+          try {
+            const doc = JSON.parse(t);
+            content = doc?.choices?.[0]?.message?.content || "";
+          } catch {
+            // 是 SSE，看看有没有 error
+          }
+          const errMatch = /"code"\s*:\s*(\d+)/.exec(t);
+          if (errMatch && /error/i.test(t.slice(0, 200))) {
+            ok = false;
+            message = "上游返回错误码 " + errMatch[1];
+          } else {
+            ok = true;
+            message = "正常";
+          }
+        } else {
+          ok = false;
+          const codeMatch = /"code"\s*:\s*(\d+)/.exec(t);
+          const msgMatch = /"msg"\s*:\s*"([^"]{0,80})"/.exec(t);
+          if (codeMatch && codeMatch[1] === "14018") {
+            message = "积分已用尽";
+          } else if (codeMatch) {
+            message = "错误码 " + codeMatch[1] + (msgMatch ? "：" + msgMatch[1] : "");
+          } else {
+            message = "HTTP " + r.status;
+          }
+        }
+      } catch (e) {
+        latencyMs = Date.now() - started;
+        ok = false;
+        message = String(e).includes("timeout") || String(e).includes("abort")
+          ? "超时"
+          : "网络错误：" + String(e).slice(0, 60);
+      }
+
+      // 顺带查一次余额（强制刷新）
+      const bal = await fetchBalance(cred, true).catch(() => null);
+
+      console.error(
+        "[workbuddy-shim] 测试账号 " + accountId.slice(0, 12) +
+        " → " + (ok ? "通过" : "失败") + "（" + message + "）"
+      );
+
+      sendJson(res, 200, {
+        ok,
+        accountId,
+        region,
+        model,
+        latencyMs,
+        message,
+        credit: bal ? bal.credit : null,
+      });
+    })().catch((e) => {
+      if (!res.headersSent) sendError(res, 500, String(e), "internal");
+    });
+    return;
+  }
+
+  // 切换当前使用的账号（粘性）
+  if (req.method === "POST" && (url === "/accounts/switch" || url.startsWith("/accounts/switch?"))) {
+    (async () => {
+      let body = {};
+      try {
+        const raw = (await readBody(req)).toString("utf8");
+        if (raw.trim() !== "") body = JSON.parse(raw);
+      } catch { /* ignore */ }
+      const accountId = String(body.accountId || "");
+      const region = String(body.region || REGION);
+      const files = listVaultFiles(region);
+      const hit = files.find((x) => x.accountId === accountId);
+      if (!hit) {
+        sendError(res, 404, "账号不存在: " + accountId, "not_found");
+        return;
+      }
+      stickyAccountId = accountId;
+      cachedCredential = null;   // 强制下次重新解析
+      console.error("[workbuddy-shim] 已切换到账号 " + accountId);
+      sendJson(res, 200, { ok: true, current: accountId, region });
+    })().catch((e) => {
+      if (!res.headersSent) sendError(res, 500, String(e), "internal");
+    });
+    return;
+  }
+
   // 官方模型名册（/v3/config）—— 完整清单 + 计费规则 + 促销
   if (req.method === "GET" && (url === "/v3/models" || url === "/v3/models/" || url.startsWith("/v3/models?"))) {
     (async () => {
@@ -1351,12 +2679,50 @@ const server = createServer((req, res) => {
         };
       })
       .sort((a, b) => b.credit - a.credit || b.calls - a.calls);
+    // 按账号统计（如果记录里有 accountId）
+    const byAccount = {};
+    for (const [id, x] of Object.entries(byModel)) {
+      const acc = x.accountId || "unknown";
+      if (!byAccount[acc]) {
+        byAccount[acc] = { accountId: acc, calls: 0, credit: 0 };
+      }
+      byAccount[acc].calls += x.calls || 0;
+      byAccount[acc].credit = Number(
+        (byAccount[acc].credit + (x.credit || 0)).toFixed(4)
+      );
+    }
+
+    // 当前账号信息（从 vault 读，含剩余有效期）
+    let currentAccount = null;
+    try {
+      const files = listVaultFiles(REGION);
+      const cur = files.find((f2) => f2.accountId === stickyAccountId) || files[0];
+      if (cur) {
+        const a = readVaultFile(cur.path);
+        if (a) {
+          currentAccount = {
+            accountId: a.accountId,
+            nickname: a.nickname,
+            uid: a.uid,
+            expiresAtMs: a.expiresAtMs,
+            remainDays: a.expiresAtMs > 0
+              ? Math.max(0, Math.floor((a.expiresAtMs - Date.now()) / 86400000))
+              : null,
+          };
+        }
+      }
+    } catch { /* ignore */ }
+
     sendJson(res, 200, {
       ok: true,
       since: costStats.since,
+      region: REGION,
       totalCredit: Number(totalCredit.toFixed(4)),
       totalCalls,
       totalFails,
+      currentAccount,
+      accountCount: listVaultFiles(REGION).length,
+      byAccount: Object.values(byAccount).sort((a, b) => b.credit - a.credit),
       byModel: rows,
     });
     return;

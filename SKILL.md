@@ -9,7 +9,7 @@ description: 白嫖机器人：把已付费的 WorkBuddy / Trae / Qoder 订阅�
 连同视觉轮换层和 LLM 池，通过 loopback shim 变成 AstrBot 可用的模型源。
 
 **仓库**：https://github.com/rawLeaf/astrbot_plugin_shim_connector
-**当前版本**：v1.5.4（2026-11-05）
+**当前版本**：v1.6.0（2026-11-05）
 
 ---
 
@@ -378,7 +378,7 @@ AstrBot 会把 `data/plugins/` 下**每个子目录**当插件扫。备份目录
     ↓
 改代码
     ↓
-同步到部署副本 D:\4game\ai\robot\core\data\plugins\
+同步到部署副本 <AstrBot>/data/plugins/
     ↓
 语法检查 + 安全审计
     ↓

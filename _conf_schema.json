@@ -31,7 +31,7 @@
         "description": "启用",
         "type": "bool",
         "default": true,
-        "hint": "本 shim 的开关。**最终启用 = 总闸 AND 这一项**（总闸关闭时这一项不生效）。\n\n改完保存后需要重启 AstrBot 才生效。\n\n想不重启就启停单个 shim：\n  POST /api/plugins/extensions/astrbot_plugin_shim_connector/toggle\n  body: {\"name\":\"trae\"}\n  （需要面板登录态；插件页的热启停按钮走的也是这个接口）\n\n注意：通过 API 停用的 shim 只对本次运行有效，\n重启 AstrBot 后仍按这里的配置决定。",
+        "hint": "本 shim 的开关。**最终启用 = 总闸 AND 这一项**（总闸关闭时这一项不生效）。\n\n改完保存后需要重启 AstrBot 才生效。\n\n想不重启就启停单个 shim：\n  POST /api/v1/plugins/extensions/astrbot_plugin_shim_connector/toggle\n  body: {\"name\":\"trae\"}\n  （需要面板登录态；插件页的热启停按钮走的也是这个接口）\n\n注意：通过 API 停用的 shim 只对本次运行有效，\n重启 AstrBot 后仍按这里的配置决定。",
         "obvious_hint": true
       },
       "models": {
@@ -67,7 +67,7 @@
         "type": "string",
         "default": "",
         "_special": "divider",
-        "hint": "**怎么知道哪些模型免费、哪些花钱？**\n\n看插件页的「模型名册」或者调：\n  GET /api/plugins/extensions/astrbot_plugin_shim_connector/catalog\n\n返回里每个模型带：\n  · `free: true` → 免费\n  · `cost: 0.01` → 每次约扣 0.01 积分\n  · `latencyMs` → 实测延迟\n\n已实测的免费模型（workbuddy）：\n  glm-5.2 / space-bunny / hy3-b / hy3-c / hy3-x /\n  deepseek-v4.1-flash / hy3 / deepseek-v4-flash /\n  deepseek-v4-pro / auto / glm-5.3-flash / hy4free\n\n要钱的：hy4std(0.06) / glm-5.3(0.01) / minimax-m3.1-flash(0.01) /\n         step-5-preview(0.02)\n\n**注意 hy4 分两个版本**：hy4free 免费但慢（5.5s），hy4std 要钱但快（3.5s）。",
+        "hint": "**怎么知道哪些模型免费、哪些花钱？**\n\n看插件页的「模型名册」或者调：\n  GET /api/v1/plugins/extensions/astrbot_plugin_shim_connector/catalog\n\n返回里每个模型带：\n  · `free: true` → 免费\n  · `cost: 0.01` → 每次约扣 0.01 积分\n  · `latencyMs` → 实测延迟\n\n已实测的免费模型（workbuddy）：\n  glm-5.2 / space-bunny / hy3-b / hy3-c / hy3-x /\n  deepseek-v4.1-flash / hy3 / deepseek-v4-flash /\n  deepseek-v4-pro / auto / glm-5.3-flash / hy4free\n\n要钱的：hy4std(0.06) / glm-5.3(0.01) / minimax-m3.1-flash(0.01) /\n         step-5-preview(0.02)\n\n**注意 hy4 分两个版本**：hy4free 免费但慢（5.5s），hy4std 要钱但快（3.5s）。",
         "obvious_hint": true
       }
     }
@@ -81,7 +81,7 @@
         "description": "启用",
         "type": "bool",
         "default": true,
-        "hint": "本 shim 的开关。**最终启用 = 总闸 AND 这一项**（总闸关闭时这一项不生效）。\n\n改完保存后需要重启 AstrBot 才生效。\n\n想不重启就启停单个 shim：\n  POST /api/plugins/extensions/astrbot_plugin_shim_connector/toggle\n  body: {\"name\":\"trae\"}\n  （需要面板登录态；插件页的热启停按钮走的也是这个接口）\n\n注意：通过 API 停用的 shim 只对本次运行有效，\n重启 AstrBot 后仍按这里的配置决定。",
+        "hint": "本 shim 的开关。**最终启用 = 总闸 AND 这一项**（总闸关闭时这一项不生效）。\n\n改完保存后需要重启 AstrBot 才生效。\n\n想不重启就启停单个 shim：\n  POST /api/v1/plugins/extensions/astrbot_plugin_shim_connector/toggle\n  body: {\"name\":\"trae\"}\n  （需要面板登录态；插件页的热启停按钮走的也是这个接口）\n\n注意：通过 API 停用的 shim 只对本次运行有效，\n重启 AstrBot 后仍按这里的配置决定。",
         "obvious_hint": true
       },
       "models": {
@@ -117,7 +117,7 @@
         "type": "string",
         "default": "",
         "_special": "divider",
-        "hint": "**怎么知道哪些模型免费、哪些花钱？**\n\n看插件页的「模型名册」或者调：\n  GET /api/plugins/extensions/astrbot_plugin_shim_connector/catalog\n\n返回里每个模型带：\n  · `free: true` → 免费\n  · `cost: 0.01` → 每次约扣 0.01 积分\n  · `latencyMs` → 实测延迟\n\n已实测的免费模型（workbuddy）：\n  glm-5.2 / space-bunny / hy3-b / hy3-c / hy3-x /\n  deepseek-v4.1-flash / hy3 / deepseek-v4-flash /\n  deepseek-v4-pro / auto / glm-5.3-flash / hy4free\n\n要钱的：hy4std(0.06) / glm-5.3(0.01) / minimax-m3.1-flash(0.01) /\n         step-5-preview(0.02)\n\n**注意 hy4 分两个版本**：hy4free 免费但慢（5.5s），hy4std 要钱但快（3.5s）。",
+        "hint": "**怎么知道哪些模型免费、哪些花钱？**\n\n看插件页的「模型名册」或者调：\n  GET /api/v1/plugins/extensions/astrbot_plugin_shim_connector/catalog\n\n返回里每个模型带：\n  · `free: true` → 免费\n  · `cost: 0.01` → 每次约扣 0.01 积分\n  · `latencyMs` → 实测延迟\n\n已实测的免费模型（workbuddy）：\n  glm-5.2 / space-bunny / hy3-b / hy3-c / hy3-x /\n  deepseek-v4.1-flash / hy3 / deepseek-v4-flash /\n  deepseek-v4-pro / auto / glm-5.3-flash / hy4free\n\n要钱的：hy4std(0.06) / glm-5.3(0.01) / minimax-m3.1-flash(0.01) /\n         step-5-preview(0.02)\n\n**注意 hy4 分两个版本**：hy4free 免费但慢（5.5s），hy4std 要钱但快（3.5s）。",
         "obvious_hint": true
       }
     }
@@ -131,7 +131,7 @@
         "description": "启用",
         "type": "bool",
         "default": true,
-        "hint": "本 shim 的开关。**最终启用 = 总闸 AND 这一项**（总闸关闭时这一项不生效）。\n\n改完保存后需要重启 AstrBot 才生效。\n\n想不重启就启停单个 shim：\n  POST /api/plugins/extensions/astrbot_plugin_shim_connector/toggle\n  body: {\"name\":\"trae\"}\n  （需要面板登录态；插件页的热启停按钮走的也是这个接口）\n\n注意：通过 API 停用的 shim 只对本次运行有效，\n重启 AstrBot 后仍按这里的配置决定。",
+        "hint": "本 shim 的开关。**最终启用 = 总闸 AND 这一项**（总闸关闭时这一项不生效）。\n\n改完保存后需要重启 AstrBot 才生效。\n\n想不重启就启停单个 shim：\n  POST /api/v1/plugins/extensions/astrbot_plugin_shim_connector/toggle\n  body: {\"name\":\"trae\"}\n  （需要面板登录态；插件页的热启停按钮走的也是这个接口）\n\n注意：通过 API 停用的 shim 只对本次运行有效，\n重启 AstrBot 后仍按这里的配置决定。",
         "obvious_hint": true
       },
       "models": {
@@ -167,7 +167,7 @@
         "type": "string",
         "default": "",
         "_special": "divider",
-        "hint": "**怎么知道哪些模型免费、哪些花钱？**\n\n看插件页的「模型名册」或者调：\n  GET /api/plugins/extensions/astrbot_plugin_shim_connector/catalog\n\n返回里每个模型带：\n  · `free: true` → 免费\n  · `cost: 0.01` → 每次约扣 0.01 积分\n  · `latencyMs` → 实测延迟\n\n已实测的免费模型（workbuddy）：\n  glm-5.2 / space-bunny / hy3-b / hy3-c / hy3-x /\n  deepseek-v4.1-flash / hy3 / deepseek-v4-flash /\n  deepseek-v4-pro / auto / glm-5.3-flash / hy4free\n\n要钱的：hy4std(0.06) / glm-5.3(0.01) / minimax-m3.1-flash(0.01) /\n         step-5-preview(0.02)\n\n**注意 hy4 分两个版本**：hy4free 免费但慢（5.5s），hy4std 要钱但快（3.5s）。",
+        "hint": "**怎么知道哪些模型免费、哪些花钱？**\n\n看插件页的「模型名册」或者调：\n  GET /api/v1/plugins/extensions/astrbot_plugin_shim_connector/catalog\n\n返回里每个模型带：\n  · `free: true` → 免费\n  · `cost: 0.01` → 每次约扣 0.01 积分\n  · `latencyMs` → 实测延迟\n\n已实测的免费模型（workbuddy）：\n  glm-5.2 / space-bunny / hy3-b / hy3-c / hy3-x /\n  deepseek-v4.1-flash / hy3 / deepseek-v4-flash /\n  deepseek-v4-pro / auto / glm-5.3-flash / hy4free\n\n要钱的：hy4std(0.06) / glm-5.3(0.01) / minimax-m3.1-flash(0.01) /\n         step-5-preview(0.02)\n\n**注意 hy4 分两个版本**：hy4free 免费但慢（5.5s），hy4std 要钱但快（3.5s）。",
         "obvious_hint": true
       }
     }
@@ -181,7 +181,7 @@
         "description": "启用",
         "type": "bool",
         "default": false,
-        "hint": "本 shim 的开关。**最终启用 = 总闸 AND 这一项**（总闸关闭时这一项不生效）。\n\n改完保存后需要重启 AstrBot 才生效。\n\n想不重启就启停单个 shim：\n  POST /api/plugins/extensions/astrbot_plugin_shim_connector/toggle\n  body: {\"name\":\"trae\"}\n  （需要面板登录态；插件页的热启停按钮走的也是这个接口）\n\n注意：通过 API 停用的 shim 只对本次运行有效，\n重启 AstrBot 后仍按这里的配置决定。",
+        "hint": "本 shim 的开关。**最终启用 = 总闸 AND 这一项**（总闸关闭时这一项不生效）。\n\n改完保存后需要重启 AstrBot 才生效。\n\n想不重启就启停单个 shim：\n  POST /api/v1/plugins/extensions/astrbot_plugin_shim_connector/toggle\n  body: {\"name\":\"trae\"}\n  （需要面板登录态；插件页的热启停按钮走的也是这个接口）\n\n注意：通过 API 停用的 shim 只对本次运行有效，\n重启 AstrBot 后仍按这里的配置决定。",
         "obvious_hint": true
       },
       "models": {
@@ -217,7 +217,7 @@
         "type": "string",
         "default": "",
         "_special": "divider",
-        "hint": "**怎么知道哪些模型免费、哪些花钱？**\n\n看插件页的「模型名册」或者调：\n  GET /api/plugins/extensions/astrbot_plugin_shim_connector/catalog\n\n返回里每个模型带：\n  · `free: true` → 免费\n  · `cost: 0.01` → 每次约扣 0.01 积分\n  · `latencyMs` → 实测延迟\n\n已实测的免费模型（workbuddy）：\n  glm-5.2 / space-bunny / hy3-b / hy3-c / hy3-x /\n  deepseek-v4.1-flash / hy3 / deepseek-v4-flash /\n  deepseek-v4-pro / auto / glm-5.3-flash / hy4free\n\n要钱的：hy4std(0.06) / glm-5.3(0.01) / minimax-m3.1-flash(0.01) /\n         step-5-preview(0.02)\n\n**注意 hy4 分两个版本**：hy4free 免费但慢（5.5s），hy4std 要钱但快（3.5s）。",
+        "hint": "**怎么知道哪些模型免费、哪些花钱？**\n\n看插件页的「模型名册」或者调：\n  GET /api/v1/plugins/extensions/astrbot_plugin_shim_connector/catalog\n\n返回里每个模型带：\n  · `free: true` → 免费\n  · `cost: 0.01` → 每次约扣 0.01 积分\n  · `latencyMs` → 实测延迟\n\n已实测的免费模型（workbuddy）：\n  glm-5.2 / space-bunny / hy3-b / hy3-c / hy3-x /\n  deepseek-v4.1-flash / hy3 / deepseek-v4-flash /\n  deepseek-v4-pro / auto / glm-5.3-flash / hy4free\n\n要钱的：hy4std(0.06) / glm-5.3(0.01) / minimax-m3.1-flash(0.01) /\n         step-5-preview(0.02)\n\n**注意 hy4 分两个版本**：hy4free 免费但慢（5.5s），hy4std 要钱但快（3.5s）。",
         "obvious_hint": true
       }
     }
@@ -231,7 +231,7 @@
         "description": "启用",
         "type": "bool",
         "default": false,
-        "hint": "本 shim 的开关。**最终启用 = 总闸 AND 这一项**（总闸关闭时这一项不生效）。\n\n改完保存后需要重启 AstrBot 才生效。\n\n想不重启就启停单个 shim：\n  POST /api/plugins/extensions/astrbot_plugin_shim_connector/toggle\n  body: {\"name\":\"trae\"}\n  （需要面板登录态；插件页的热启停按钮走的也是这个接口）\n\n注意：通过 API 停用的 shim 只对本次运行有效，\n重启 AstrBot 后仍按这里的配置决定。",
+        "hint": "本 shim 的开关。**最终启用 = 总闸 AND 这一项**（总闸关闭时这一项不生效）。\n\n改完保存后需要重启 AstrBot 才生效。\n\n想不重启就启停单个 shim：\n  POST /api/v1/plugins/extensions/astrbot_plugin_shim_connector/toggle\n  body: {\"name\":\"trae\"}\n  （需要面板登录态；插件页的热启停按钮走的也是这个接口）\n\n注意：通过 API 停用的 shim 只对本次运行有效，\n重启 AstrBot 后仍按这里的配置决定。",
         "obvious_hint": true
       },
       "models": {
@@ -331,7 +331,7 @@
         "type": "string",
         "default": "",
         "_special": "divider",
-        "hint": "这一层是**多个上游轮流用**，不是单一模型。\n\n**自动调节开着时**（默认）：\n  1. 按健康分排序（分数高的先试）\n  2. 同分按「优先级列表」顺序\n  3. 长期超时的自动沉底，成功一次 +5 分慢慢爬回来\n\n**怎么手动调整顺序**：\n  · 填「优先级列表」→ 同分时按你填的顺序\n  · 想强制排第一 → 把它填在列表最前面，并且关掉自动调节\n\n**怎么看当前实际顺序**：\n  GET /api/plugins/extensions/astrbot_plugin_shim_connector/health?name=vision\n\n返回里 `rank` 是实际尝试顺序，`base_rank` 是你在配置里排的位置。\n两者不同 = 自动调节在起作用。",
+        "hint": "这一层是**多个上游轮流用**，不是单一模型。\n\n**自动调节开着时**（默认）：\n  1. 按健康分排序（分数高的先试）\n  2. 同分按「优先级列表」顺序\n  3. 长期超时的自动沉底，成功一次 +5 分慢慢爬回来\n\n**怎么手动调整顺序**：\n  · 填「优先级列表」→ 同分时按你填的顺序\n  · 想强制排第一 → 把它填在列表最前面，并且关掉自动调节\n\n**怎么看当前实际顺序**：\n  GET /api/v1/plugins/extensions/astrbot_plugin_shim_connector/health?name=vision\n\n返回里 `rank` 是实际尝试顺序，`base_rank` 是你在配置里排的位置。\n两者不同 = 自动调节在起作用。",
         "obvious_hint": true
       }
     }
@@ -345,7 +345,7 @@
         "description": "启用",
         "type": "bool",
         "default": false,
-        "hint": "本 shim 的开关。**最终启用 = 总闸 AND 这一项**（总闸关闭时这一项不生效）。\n\n改完保存后需要重启 AstrBot 才生效。\n\n想不重启就启停单个 shim：\n  POST /api/plugins/extensions/astrbot_plugin_shim_connector/toggle\n  body: {\"name\":\"trae\"}\n  （需要面板登录态；插件页的热启停按钮走的也是这个接口）\n\n注意：通过 API 停用的 shim 只对本次运行有效，\n重启 AstrBot 后仍按这里的配置决定。",
+        "hint": "本 shim 的开关。**最终启用 = 总闸 AND 这一项**（总闸关闭时这一项不生效）。\n\n改完保存后需要重启 AstrBot 才生效。\n\n想不重启就启停单个 shim：\n  POST /api/v1/plugins/extensions/astrbot_plugin_shim_connector/toggle\n  body: {\"name\":\"trae\"}\n  （需要面板登录态；插件页的热启停按钮走的也是这个接口）\n\n注意：通过 API 停用的 shim 只对本次运行有效，\n重启 AstrBot 后仍按这里的配置决定。",
         "obvious_hint": true
       },
       "models": {
@@ -445,7 +445,7 @@
         "type": "string",
         "default": "",
         "_special": "divider",
-        "hint": "这一层是**多个上游轮流用**，不是单一模型。\n\n**自动调节开着时**（默认）：\n  1. 按健康分排序（分数高的先试）\n  2. 同分按「优先级列表」顺序\n  3. 长期超时的自动沉底，成功一次 +5 分慢慢爬回来\n\n**怎么手动调整顺序**：\n  · 填「优先级列表」→ 同分时按你填的顺序\n  · 想强制排第一 → 把它填在列表最前面，并且关掉自动调节\n\n**怎么看当前实际顺序**：\n  GET /api/plugins/extensions/astrbot_plugin_shim_connector/health?name=llm_pool\n\n返回里 `rank` 是实际尝试顺序，`base_rank` 是你在配置里排的位置。\n两者不同 = 自动调节在起作用。",
+        "hint": "这一层是**多个上游轮流用**，不是单一模型。\n\n**自动调节开着时**（默认）：\n  1. 按健康分排序（分数高的先试）\n  2. 同分按「优先级列表」顺序\n  3. 长期超时的自动沉底，成功一次 +5 分慢慢爬回来\n\n**怎么手动调整顺序**：\n  · 填「优先级列表」→ 同分时按你填的顺序\n  · 想强制排第一 → 把它填在列表最前面，并且关掉自动调节\n\n**怎么看当前实际顺序**：\n  GET /api/v1/plugins/extensions/astrbot_plugin_shim_connector/health?name=llm_pool\n\n返回里 `rank` 是实际尝试顺序，`base_rank` 是你在配置里排的位置。\n两者不同 = 自动调节在起作用。",
         "obvious_hint": true
       }
     }

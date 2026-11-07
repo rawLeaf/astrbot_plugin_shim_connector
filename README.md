@@ -208,6 +208,77 @@
 | `vision` | 8791 | `vision_rotator` | 视觉轮换层（5 个上游）|
 | `llm_pool` | 8792 | `llm_pool` | 通用 LLM 池（10 个上游）|
 
+## 账号池（多账号轮换）
+
+> ⚠️ **多账号会让 ToS 风险显著升高。** 使用前请先读 [免责声明 · 六、多账号池化](#六多账号池化风险显著升高)。
+
+### 三种添加方式
+
+| 方式 | 操作 | 适用 |
+|---|---|---|
+| **导入本地 vault** | 页面点「检测本地账号」 | 已经用 dsh-connect-workbuddy 存过账号 |
+| **导入桌面端凭据** | 同上，会自动扫 | 只用过 WorkBuddy 客户端 |
+| **扫码添加** | 页面点「扫码添加」 | 新账号，手机上确认 |
+
+### 自动检测会扫哪些位置
+
+```
+$WB_DSH_VAULT              （环境变量，最优先）
+$DSH_HOME/workbuddy-vault  （环境变量）
+~/.dsh/workbuddy-vault     （默认）
+~/dev/dsh-home/...         （常见自定义）
+<每个盘符>/dev/dsh-home/... （Windows 扫盘）
+<每个盘符>/dsh-home/...
+```
+
+页面会列出**所有试过的位置**和每个位置里有几个账号。找不到就走「手动指定路径」。
+
+### 额度用尽自动换号
+
+```
+请求 → 用当前账号
+        ↓ 额度用尽（14018/1113）
+   冷却 30 分钟，换同区下一个账号
+        ↓ 同区都没了
+   换另一个区（可关：WB_CROSS_REGION=0）
+        ↓ 都不行
+   如实报错
+```
+
+响应头会标记走没走兜底：
+
+| 头 | 值 | 含义 |
+|---|---|---|
+| `X-WB-Fallback` | `account-switch` | 同区换号了 |
+| `X-WB-Fallback` | `cross-region` | 跨区了 |
+| `X-WB-Account` | 账号 id 前 12 位 | 这次用的哪个 |
+
+### token 存哪
+
+```
+<插件目录>/shims/.vault/
+├── cn/<accountId>.json       ← token 明文
+└── global/<accountId>.json
+```
+
+**明文存储**（沿用 dsh-connect-workbuddy 的做法），文件权限 `0600`。
+已加入 `.gitignore`，不会进仓库。
+
+### 相关接口
+
+| 接口 | 作用 |
+|---|---|
+| `GET .../accounts/scan` | 扫描候选位置 |
+| `GET .../accounts?region=cn` | 列出账号 |
+| `GET .../accounts-current` | 当前账号 + 冷却 |
+| `POST .../accounts/import` | 导入（可带 `path`） |
+| `POST .../accounts/switch` | 切换 |
+| `POST .../accounts/delete` | 删除 |
+| `POST .../login-start` | 扫码 |
+| `GET .../login-poll` | 轮询 |
+
+---
+
 ## 安装（零配置）
 
 **装完就能用。不需要填任何 token、路径或密钥。**
@@ -405,11 +476,11 @@ qwen3.8-flash
 
 | 接口 | 方法 | 作用 |
 |---|---|---|
-| `/api/plugins/extensions/astrbot_plugin_shim_connector/status` | GET | 每个 shim 的启用/运行状态 |
-| `/api/plugins/extensions/astrbot_plugin_shim_connector/start` | POST | 启动指定 shim |
-| `/api/plugins/extensions/astrbot_plugin_shim_connector/stop` | POST | 停止指定 shim |
-| `/api/plugins/extensions/astrbot_plugin_shim_connector/restart` | POST | 重启指定 shim |
-| `/api/plugins/extensions/astrbot_plugin_shim_connector/toggle` | POST | 运行中就停，停着就起 |
+| `/api/v1/plugins/extensions/astrbot_plugin_shim_connector/status` | GET | 每个 shim 的启用/运行状态 |
+| `/api/v1/plugins/extensions/astrbot_plugin_shim_connector/start` | POST | 启动指定 shim |
+| `/api/v1/plugins/extensions/astrbot_plugin_shim_connector/stop` | POST | 停止指定 shim |
+| `/api/v1/plugins/extensions/astrbot_plugin_shim_connector/restart` | POST | 重启指定 shim |
+| `/api/v1/plugins/extensions/astrbot_plugin_shim_connector/toggle` | POST | 运行中就停，停着就起 |
 
 请求体：
 
@@ -451,19 +522,19 @@ qwen3.8-flash
 ```bash
 # 看状态
 curl -H "Authorization: Bearer <你的 WebUI token>" \
-  http://127.0.0.1:6185/api/plugins/extensions/astrbot_plugin_shim_connector/status
+  http://127.0.0.1:6185/api/v1/plugins/extensions/astrbot_plugin_shim_connector/status
 
 # 停 trae
 curl -X POST -H "Content-Type: application/json" \
   -H "Authorization: Bearer <token>" \
   -d '{"name":"trae"}' \
-  http://127.0.0.1:6185/api/plugins/extensions/astrbot_plugin_shim_connector/stop
+  http://127.0.0.1:6185/api/v1/plugins/extensions/astrbot_plugin_shim_connector/stop
 
 # 起 trae
 curl -X POST -H "Content-Type: application/json" \
   -H "Authorization: Bearer <token>" \
   -d '{"name":"trae"}' \
-  http://127.0.0.1:6185/api/plugins/extensions/astrbot_plugin_shim_connector/start
+  http://127.0.0.1:6185/api/v1/plugins/extensions/astrbot_plugin_shim_connector/start
 ```
 
 ---
@@ -673,7 +744,67 @@ WorkBuddy（腾讯 CodeBuddy） / Trae（字节） / Qoder（阿里）的服务�
 
 **但「你付过钱」≠「厂商允许你这么用」。** 这两件事必须分开看。
 
-### 六、降低风险的做法
+### 六、多账号池化：风险**显著升高**
+
+**这一节针对 v1.6 之后新增的多账号功能。** 单账号使用时可以跳过。
+
+插件支持把多个 WorkBuddy 账号放进账号池，额度用尽时自动换下一个：
+
+```
+账号 A 额度用尽 → 自动切账号 B → 账号 C → ...
+```
+
+#### 为什么这比单账号更危险
+
+| 维度 | 单账号 | 多账号池化 |
+|---|---|---|
+| 单次额度 | 正常使用 | **人为叠加多个账号的额度** |
+| 设备指纹 | 一个账号一台机器，正常 | **一台机器登录多个账号 → 明显异常** |
+| 调用模式 | 一个人的使用节奏 | **短时间内跨账号高频切换** |
+| 厂商判定 | 可能容忍 | **更可能被识别为滥用/薅羊毛** |
+
+**说白了：单账号是「换个入口用自己已付的钱」；多账号池化更接近「系统性薅订阅额度」。**
+后者的 ToS 违规程度和封号概率都明显更高。
+
+#### 具体可能发生什么
+
+| 后果 | 说明 |
+|---|---|
+| **批量封号** | 同设备指纹下的多个账号可能被一起处理 |
+| **设备级封禁** | 部分厂商会封设备而非仅封账号 |
+| 全部账号同时限流 | 检测到异常后一刀切 |
+| 上游加强检测 | 导致插件整体失效，所有用户受影响 |
+
+#### 账号从哪来的（重要）
+
+插件提供三种来源：
+
+| 来源 | 说明 |
+|---|---|
+| **导入本地 vault** | 读你机器上 dsh-connect-workbuddy 已存的账号 |
+| **导入桌面端凭据** | 读 WorkBuddy 客户端当前登录的账号 |
+| **扫码添加** | 手机扫码，登录新账号 |
+
+⚠️ **如果你用的是别人的账号、买来的账号、或批量注册的账号，风险完全是另一个量级** ——
+可能涉及账号共享/转售的违规，后果比 ToS 更严重。**插件作者不为这类用法背书。**
+
+#### 你可以怎么办
+
+1. **只用自己真实拥有的账号**，不要买/借/批量注册
+2. **不要在一台机器上堆太多账号**（2-3 个以内风险相对可控）
+3. **发现任何一个账号被限流/警告，立刻停用整个池**
+4. 对风险敏感的话，**关掉多账号**（只保留桌面端凭据那一个）
+5. 更保守的做法：**别用这个插件** —— 官方 API 虽然要钱，但不会有封号问题
+
+#### 技术上怎么关掉
+
+| 做法 | 效果 |
+|---|---|
+| 不导入任何账号 | 只用桌面端那一个，等同单账号 |
+| 删掉 `.vault/` 目录 | 清空账号池 |
+| `WB_CROSS_REGION=0` | 关掉跨区兜底（不会把一个区的 token 发给另一个区） |
+
+### 七、降低风险的做法
 
 1. **优先用小号 / 不重要的账号**，别拿主力账号赌
 2. 发现以下信号**立刻停用**：
@@ -684,7 +815,7 @@ WorkBuddy（腾讯 CodeBuddy） / Trae（字节） / Qoder（阿里）的服务�
 4. 不要在**商业 / 生产环境**用这条链路（见下方「适用范围」）
 5. **不接受风险就别装** —— 这是完全合理的选择
 
-### 七、如果你在分发 / 二次开发
+### 八、如果你在分发 / 二次开发
 
 - 请保留本免责声明与 LICENSE 中的上游署名
 - 不要把「可用」宣传成「官方支持」
@@ -693,7 +824,7 @@ WorkBuddy（腾讯 CodeBuddy） / Trae（字节） / Qoder（阿里）的服务�
 ---
 ## 变更日志
 
-当前版本 **1.5.4** —— 完整变更见 [CHANGELOG.md](CHANGELOG.md)。
+当前版本 **1.6.0** —— 完整变更见 [CHANGELOG.md](CHANGELOG.md)。
 
 ---
 

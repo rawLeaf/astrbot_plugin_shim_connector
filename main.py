@@ -1593,12 +1593,21 @@ class ShimConnector(Star):
             ("restart", self._api_restart, ["POST"], "重启指定 shim"),
             ("toggle", self._api_toggle, ["POST"], "切换指定 shim 启停"),
             ("refresh-models", self._api_refresh_models, ["POST"], "探测上游模型"),
+            ("accounts/scan", self._api_accounts_scan, ["GET"], "扫描 vault 候选位置"),
+            ("accounts", self._api_accounts, ["GET"], "列出账号"),
+            ("accounts/current", self._api_accounts_current, ["GET"], "当前账号"),
+            ("accounts/import", self._api_accounts_import, ["POST"], "导入本地账号"),
+            ("accounts/switch", self._api_accounts_switch, ["POST"], "切换账号"),
+            ("accounts/delete", self._api_accounts_delete, ["POST"], "删除账号"),
+            ("accounts/test", self._api_accounts_test, ["POST"], "测试账号可用性"),
+            ("login/start", self._api_login_start, ["POST"], "发起扫码登录"),
+            ("login/poll", self._api_login_poll, ["GET"], "轮询登录结果"),
             ("catalog", self._api_catalog, ["GET"], "聚合三家的完整名册（含成本/勾选/顺序）"),
             ("select-models", self._api_select_models, ["POST"], "保存模型勾选与顺序"),
             ("auto-tune", self._api_auto_tune, ["GET", "POST"], "读/写自动调节开关"),
             ("models", self._api_models, ["GET"], "单家官方模型名册"),
             ("cost", self._api_cost, ["GET"], "耗费统计"),
-            ("cost-reset", self._api_cost_reset, ["POST"], "重置耗费统计"),
+            ("cost/reset", self._api_cost_reset, ["POST"], "重置耗费统计"),
             ("health", self._api_health, ["GET"], "轮换层健康分"),
             ("reset-health", self._api_reset_health, ["POST"], "重置健康分"),
         )
@@ -1978,6 +1987,40 @@ class ShimConnector(Star):
         except aiohttp.ClientError as exc:
             raise RuntimeError(f"请求 shim 失败: {exc}") from exc
 
+    async def _proxy_shim_post(self, name: str, path: str, body: dict | None = None) -> dict:
+        """向 shim 发 POST（带 JSON body）。
+
+        Args:
+            name: shim 名。
+            path: shim 上的路径。
+            body: JSON 请求体。
+
+        Returns:
+            shim 返回的 JSON。
+        """
+        self._require_name(name)
+        port = self._port(name)
+        if await port_free_async(port):
+            raise RuntimeError(f"{name} 未在运行（端口 {port} 空闲）")
+
+        url = f"http://127.0.0.1:{port}{path}"
+        token = self._token(name)
+        headers = {"Authorization": f"Bearer {token}"}
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url,
+                    headers=headers,
+                    json=body or {},
+                    timeout=aiohttp.ClientTimeout(total=120),
+                ) as resp:
+                    text = await resp.text()
+                    if resp.status != 200:
+                        raise RuntimeError(f"shim 返回 HTTP{resp.status}: {text[:200]}")
+                    return json.loads(text)
+        except aiohttp.ClientError as exc:
+            raise RuntimeError(f"请求 shim 失败: {exc}") from exc
+
     async def _api_health(self):
         """查某个轮换层的健康分与当前排序。
 
@@ -2062,8 +2105,6 @@ class ShimConnector(Star):
                 except Exception:  # noqa: BLE001
                     pass
             self._require_name(name)
-            if not self._all_defs()[name]["script"].startswith("workbuddy-shim"):
-                raise ValueError(f"{name} 不支持耗费统计")
             data = await self._proxy_shim(name, "/cost")
             return {"ok": True, "name": name, **data}
 
@@ -2082,8 +2123,6 @@ class ShimConnector(Star):
             body = await self._api_body()
             name = str(body.get("name") or "workbuddy").strip()
             self._require_name(name)
-            if not self._all_defs()[name]["script"].startswith("workbuddy-shim"):
-                raise ValueError(f"{name} 不支持耗费统计")
             data = await self._proxy_shim(name, "/cost/reset", "POST")
             logger.info(f"[shim_connector] {name} 耗费统计已重置")
             return {"ok": True, "name": name, "shim": data}
@@ -2235,12 +2274,40 @@ class ShimConnector(Star):
                 f"{len(section.get('models') or [])} 个勾选，"
                 f"{len(section.get('priority') or [])} 个优先级"
             )
+
+            # 立刻重新注册 provider —— 否则 AstrBot 的模型下拉不会刷新
+            #
+            # 流程：注销旧的 → 按新配置重新注册
+            # 失败不致命：配置已经落盘，用户重载插件也能生效
+            reregistered = 0
+            reregister_error = ""
+            try:
+                removed = await self._unregister_providers(name)
+                logger.info(f"[shim_connector] {name} 已注销 {removed} 个旧 provider")
+                await self._register_provider(name)
+                source_id = self._all_defs()[name]["source_id"]
+                reregistered = len(
+                    [p for p in self.registered if p.startswith(source_id + "/")]
+                )
+                logger.info(f"[shim_connector] {name} 已重新注册 provider")
+            except Exception as exc:  # noqa: BLE001
+                reregister_error = str(exc)
+                logger.warning(
+                    f"[shim_connector] {name} 重新注册失败（配置已保存，重载插件可生效）: {exc}"
+                )
+
             return {
                 "ok": True,
                 "name": name,
                 "models": section.get("models") or [],
                 "priority": section.get("priority") or [],
-                "hint": "已写入配置。需要重启该 shim 或重载插件让 AstrBot 重新注册 provider。",
+                "reregistered": reregister_error == "",
+                "reregisterError": reregister_error,
+                "hint": (
+                    "已保存并重新注册。刷新页面即可在 AstrBot 模型下拉里看到。"
+                    if reregister_error == ""
+                    else f"配置已保存，但重新注册失败：{reregister_error}。重载插件可生效。"
+                ),
             }
 
         try:
@@ -2287,6 +2354,193 @@ class ShimConnector(Star):
                 "enabled": self._auto_tune(name),
                 "params": self._tune_params(name),
             }
+
+        try:
+            return await self._api_response(await handler())
+        except (ValueError, RuntimeError) as exc:
+            return await self._api_response({"ok": False, "message": str(exc)}, 400)
+
+    # ── 账号管理（转发到 workbuddy shim）──────────────────────
+
+    async def _api_accounts_scan(self):
+        """扫描 vault 候选位置，返回「找过哪些地方」。"""
+
+        async def handler():
+            data = await self._proxy_shim("workbuddy", "/accounts/scan")
+            cands = data.get("candidates") or []
+            found = [c for c in cands if c.get("exists") and c.get("accountCount", 0) > 0]
+            logger.info(
+                f"[shim_connector] 扫描 vault：{len(cands)} 个候选，"
+                f"{len(found)} 个有账号"
+            )
+            return {"ok": True, **data}
+
+        try:
+            return await self._api_response(await handler())
+        except (ValueError, RuntimeError) as exc:
+            return await self._api_response({"ok": False, "message": str(exc)}, 400)
+
+    async def _api_accounts(self):
+        """列出某区所有账号。?region=cn|global"""
+
+        async def handler():
+            region = "cn"
+            if _quart_request is not None:
+                try:
+                    region = str(_quart_request.args.get("region") or "cn").strip()
+                except Exception:  # noqa: BLE001
+                    pass
+            if region not in ("cn", "global"):
+                raise ValueError("region 只能是 cn 或 global")
+            data = await self._proxy_shim("workbuddy", f"/accounts?region={region}")
+            return {"ok": True, "region": region, **data}
+
+        try:
+            return await self._api_response(await handler())
+        except (ValueError, RuntimeError) as exc:
+            return await self._api_response({"ok": False, "message": str(exc)}, 400)
+
+    async def _api_accounts_current(self):
+        """当前正在用的账号 + 冷却状态。"""
+
+        async def handler():
+            data = await self._proxy_shim("workbuddy", "/accounts/current")
+            return {"ok": True, **data}
+
+        try:
+            return await self._api_response(await handler())
+        except (ValueError, RuntimeError) as exc:
+            return await self._api_response({"ok": False, "message": str(exc)}, 400)
+
+    async def _api_accounts_import(self):
+        """从 dsh vault / 桌面端导入账号。"""
+
+        async def handler():
+            body = await self._api_body()
+            payload = {
+                "dryRun": bool(body.get("dryRun")),
+                "source": str(body.get("source") or "all"),
+            }
+            manual_path = str(body.get("path") or "").strip()
+            if manual_path:
+                payload["path"] = manual_path
+                logger.info(f"[shim_connector] 从指定路径导入: {manual_path}")
+
+            data = await self._proxy_shim_post(
+                "workbuddy", "/accounts/import", payload
+            )
+            total = data.get("total") or {}
+            logger.info(
+                f"[shim_connector] 导入账号：新增 {total.get('imported', 0)}，"
+                f"跳过 {total.get('skipped', 0)}"
+            )
+            return {"ok": True, **data}
+
+        try:
+            return await self._api_response(await handler())
+        except (ValueError, RuntimeError) as exc:
+            return await self._api_response({"ok": False, "message": str(exc)}, 400)
+
+    async def _api_accounts_switch(self):
+        """切换账号。body: {accountId, region}"""
+
+        async def handler():
+            body = await self._api_body()
+            account_id = str(body.get("accountId") or "").strip()
+            if not account_id:
+                raise ValueError("缺少 accountId")
+            region = str(body.get("region") or "cn")
+            data = await self._proxy_shim_post(
+                "workbuddy",
+                "/accounts/switch",
+                {"accountId": account_id, "region": region},
+            )
+            logger.info(f"[shim_connector] 切换账号 → {account_id[:12]}")
+            return {"ok": True, **data}
+
+        try:
+            return await self._api_response(await handler())
+        except (ValueError, RuntimeError) as exc:
+            return await self._api_response({"ok": False, "message": str(exc)}, 400)
+
+    async def _api_accounts_delete(self):
+        """删除账号。body: {accountId, region}"""
+
+        async def handler():
+            body = await self._api_body()
+            account_id = str(body.get("accountId") or "").strip()
+            if not account_id:
+                raise ValueError("缺少 accountId")
+            region = str(body.get("region") or "cn")
+            data = await self._proxy_shim_post(
+                "workbuddy",
+                "/accounts/delete",
+                {"accountId": account_id, "region": region},
+            )
+            logger.info(f"[shim_connector] 删除账号 {account_id[:12]}")
+            return {"ok": True, **data}
+
+        try:
+            return await self._api_response(await handler())
+        except (ValueError, RuntimeError) as exc:
+            return await self._api_response({"ok": False, "message": str(exc)}, 400)
+
+    async def _api_accounts_test(self):
+        """测试账号是否可用。body: {accountId, region}"""
+
+        async def handler():
+            body = await self._api_body()
+            account_id = str(body.get("accountId") or "").strip()
+            if not account_id:
+                raise ValueError("缺少 accountId")
+            payload = {
+                "accountId": account_id,
+                "region": str(body.get("region") or "cn"),
+            }
+            if body.get("model"):
+                payload["model"] = str(body["model"])
+            data = await self._proxy_shim_post("workbuddy", "/accounts/test", payload)
+            logger.info(
+                f"[shim_connector] 测试账号 {account_id[:12]}: "
+                f"{'通过' if data.get('ok') else '失败'} ({data.get('message', '')})"
+            )
+            return {"ok": True, **data}
+
+        try:
+            return await self._api_response(await handler())
+        except (ValueError, RuntimeError) as exc:
+            return await self._api_response({"ok": False, "message": str(exc)}, 400)
+
+    async def _api_login_start(self):
+        """发起扫码登录。body: {region}"""
+
+        async def handler():
+            body = await self._api_body()
+            region = str(body.get("region") or "cn")
+            data = await self._proxy_shim_post("workbuddy", "/login/start", {"region": region})
+            if data.get("error"):
+                raise RuntimeError(data["error"])
+            return {"ok": True, **data}
+
+        try:
+            return await self._api_response(await handler())
+        except (ValueError, RuntimeError) as exc:
+            return await self._api_response({"ok": False, "message": str(exc)}, 400)
+
+    async def _api_login_poll(self):
+        """轮询登录结果。?loginId=xxx"""
+
+        async def handler():
+            login_id = ""
+            if _quart_request is not None:
+                try:
+                    login_id = str(_quart_request.args.get("loginId") or "").strip()
+                except Exception:  # noqa: BLE001
+                    pass
+            if not login_id:
+                raise ValueError("缺少 loginId")
+            data = await self._proxy_shim("workbuddy", f"/login/poll?loginId={login_id}")
+            return {"ok": True, **data}
 
         try:
             return await self._api_response(await handler())
