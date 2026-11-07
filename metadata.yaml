@@ -1,19 +1,36 @@
 name: "astrbot_plugin_shim_connector"
 display_name: "白嫖机器人 | 本机模型接入"
-short_desc: "把你已付费的 WorkBuddy / Trae / Qoder 订阅变成机器人模型源，36 个候选模型按需勾选，零 API 费用、零配置。"
+short_desc: "把你已付费的 WorkBuddy / Trae / Qoder 订阅变成机器人模型源，66 个候选模型可勾选，支持多账号池和余额查看，零 API 费用。"
 author: "rawLeaf"
 description: >-
   白嫖机器人：把你已经付过钱的 AI 订阅（WorkBuddy / Trae / Qoder）直接变成 AstrBot 的模型源。
 
+
   这些客户端不提供 API Key，所以以前用机器人还得再付一次 API 费用。本插件在本机起 loopback shim，
   把已有订阅额度翻译成 OpenAI 兼容端点，自动注册成 AstrBot 的 provider。
 
-  边际成本 0：钱你已经付过了，只是换个入口给机器人用。合计 36 个候选模型，可按需勾选要注册哪些。
+
+  边际成本 0：钱你已经付过了，只是换个入口给机器人用。合计 66 个候选模型
+  （WorkBuddy 23 / Trae 18 / Qoder 25），可按需勾选要注册哪些。
+
 
   零配置：凭据从各客户端桌面端本地存储自动读取并解密，不填任何 token 或路径。
 
+
+  多账号池（仅 WorkBuddy）：可扫码登录或从 dsh-connect-workbuddy 的 vault 导入多个账号，
+  界面直接显示每个账号的剩余积分。额度用尽时自动冷却 30 分钟并换下一个，
+  同区换完还能跨区兜底（国内 ↔ 国际）。
+
+
+  附 WebUI 管理页（扩展功能 → 本机模型接入）：账号池 / 模型名册 / 耗费统计三个标签，
+  支持勾选启停、按免费/成本/延迟排序、国内国际分组。
+
+
   另含视觉轮换层（5 上游）和通用 LLM 池（10 上游），自动切换兜底。
-version: "1.6.1"
+  五个 shim 都有 /cost 耗费统计，按模型 + 按账号两个维度。
+
+
+version: "1.6.2"
 repo: "https://github.com/rawLeaf/astrbot_plugin_shim_connector"
 homepage: "https://github.com/rawLeaf/astrbot_plugin_shim_connector"
 license: "MIT"
@@ -37,6 +54,8 @@ tags:
   - "WorkBuddy"
   - "Trae"
   - "Qoder"
+  - "多账号"
+  - "余额查询"
 keywords:
   - shim
   - workbuddy
@@ -46,16 +65,23 @@ keywords:
   - openai-compatible
   - zero-cost
   - free
+  - multi-account
+  - balance
 features:
   - "零 API 费用：复用已有订阅额度，边际成本 0"
   - "零配置：凭据从客户端桌面端自动读取解密"
-  - "可选模型：每个 shim 可勾选要注册的模型，留空则全部"
-  - "36 个候选模型：WorkBuddy 6 + Trae 6 + Qoder 24，按需勾选"
+  - "66 个候选模型：WorkBuddy 23 + Trae 18 + Qoder 25，按需勾选"
+  - "多账号池：扫码登录 / 导入本地 vault / 手动指定路径"
+  - "余额查看：每个账号显示剩余积分，5 分钟缓存"
+  - "额度用尽自动换号：冷却 30 分钟，同区换完可跨区兜底"
+  - "账号测试：一键测可用性，回报延迟 + 积分"
+  - "WebUI 管理页：账号池 / 模型名册 / 耗费统计"
+  - "模型名册按免费→成本→延迟排序，支持国内/国际分组"
+  - "五个 shim 都有耗费统计：按模型 + 按账号"
   - "WebUI 热启停：单个 shim 启停无需重启 AstrBot"
-  - "配置热重载：点保存即自动差分启停，不用重启"
-  - "LLM 池可按优先级排序：靠前的先用，挂了才降级"
-  - "自动起停 shim 子进程"
-  - "自动探测模型并注册 provider"
-  - "shim 日志落盘 + /shim logs 命令"
+  - "配置热重载：点保存即自动差分启停"
+  - "勾选模型后立刻重新注册 provider，不用重载插件"
   - "视觉轮换层（5 上游）和通用 LLM 池（10 上游）"
+  - "健康分自动调序：长期超时的上游自动沉底"
+  - "shim 日志落盘 + /shim logs 命令"
   - "只绑 127.0.0.1，不暴露外网"
