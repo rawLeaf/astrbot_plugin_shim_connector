@@ -7,6 +7,127 @@
 
 ---
 
+## [1.6.4] — 2026-11-09
+
+### 新增：轮换层可视化编辑
+
+之前 vision / llm_pool 的轮换目标只能在 AstrBot 配置里手写字符串数组，
+很难管理（vision 23 个、llm_pool 15 个）。
+
+新增「轮换层」标签页：
+
+- **勾选式编辑**：每行一个目标，带序号、健康分、成功率
+- **↑↓ 调顺序**：列表从上到下就是优先级
+- **× 移除**：移出轮换
+- **添加更多候选**：展开看全部 128 个可用 provider
+- **保存并重启**：一条龙，写完配置自动重启 shim
+- **搜索**：两个搜索框（已选目标 / 候选池），输入即过滤，ESC 清空
+
+每行显示：健康分（100 绿 / 70 黄 / 低红）、成功率 `85% (120/141)`、冷却/降级徽章。
+
+### 新增：两个 API
+
+| 接口 | 作用 |
+|---|---|
+| `GET .../rotation-targets?name=vision` | 当前目标 + 全部候选 |
+| `POST .../rotation-save` | 保存顺序 + 自动重启 |
+
+保存返回：
+
+```json
+{"ok": true, "restarted": true, "hint": "已保存并重启，新目标立即生效。"}
+```
+
+### 修复：轮换层互相引用会死循环
+
+**问题**：候选列表里混进了 `llm_pool/llm-pool-auto`。
+
+如果把它加进视觉轮换层，就会：
+
+```
+vision 收到请求 → 转给 llm_pool → llm_pool 又转给 vision → ...
+```
+
+**修法**：两个 shim 的 `/targets` 都加排除名单：
+
+```javascript
+const EXCLUDED_SOURCES = new Set([
+  "vision", "llm_pool", "vision_rotator", "vision_shim", "llm-pool"
+]);
+if (EXCLUDED_SOURCES.has(srcId)) continue;
+if (/^(vision|llm_pool|vision_rotator)\//.test(p.id)) continue;
+```
+
+**效果**：候选 129 → **128**，循环风险 0。
+
+> 注意：`intern_qwen_vision` / `zhipu_vision` 保留 —— 它们是真实上游视觉模型，
+> 不是轮换层，vision 本来就需要它们。
+
+### 修复：轮换层面板在 main 容器外面
+
+**问题**：面板插到了 `</main>` 后面，导致：
+
+- 不受 `.shell` 的 `max-width: 1100px` 限制
+- 宽度 100% 铺满整个视口
+- 占满屏幕
+
+而账号池等其他面板都正常（有留白）。
+
+**修法**：把整个 `<section id="panel-rotation">` 移进 `</main>` 内部。
+
+修复后结构：
+
+```
+<main class="shell">           ← 1100px 居中
+  ├─ panel-accounts
+  ├─ panel-models
+  ├─ panel-cost
+  └─ panel-rotation            ← 现在在这里
+</main>
+
+扫描弹窗 / 登录弹窗             ← 这两个在 main 外（正确，全屏遮罩）
+```
+
+### 修复：所有列表用 vh 单位在 iframe 里失效
+
+插件页嵌在 iframe 里，iframe 高度跟随内容自适应，形成死循环：
+
+```
+内容变高 → iframe 变高 → 100vh 变大 → max-height 变大 → 内容又能更高
+```
+
+**修法**：全部改成固定 px。
+
+| 列表 | 之前 | 现在 |
+|---|---|---|
+| `.rot-list` | ~~52vh~~ | **380px** |
+| `.account-list` | ~~60vh~~ | **420px** |
+| `.model-list` | ~~60vh~~ | **460px** |
+| `.cost-list` | ~~55vh~~ | **400px** |
+
+另外所有 grid 行加 `minmax(0, 1fr)` + `min-width: 0`，防止长 id 撑破布局。
+
+### 变更：搜索只保留在轮换层
+
+初版给账号池、模型名册、耗费都加了搜索框，用户要求只在轮换层保留，其余已撤干净。
+
+### 验证
+
+| 检查 | 结果 |
+|---|---|
+| rotation-targets 接口 | ✅ vision 23 个 / llm_pool 15 个 |
+| 候选池 | ✅ 128 个（已过滤循环） |
+| 保存并重启 | ✅ restarted: true |
+| 循环风险 | ✅ 0 |
+| 面板位置 | ✅ 在 main 内，4 个面板全对 |
+| 标签平衡 | ✅ section 4 开 4 闭 |
+| 页面高度 | ✅ 约 695px，一屏放下 |
+| 搜索 | ✅ 仅轮换层 2 个框 |
+| 语法 | ✅ 全过 |
+| 安全扫描 | ✅ 干净 |
+
+---
+
 ## [1.6.3] — 2026-11-07
 
 ### 修复：Qoder 漏掉 10 个分组，看不到 QoDuck
@@ -1902,6 +2023,7 @@ Trae 实测真实对话返回正常（`DeepSeek-V4-Flash-Official`）。
 
 | 版本 | commit | 要点 |
 |---|---|---|
+| 1.6.4 | 待定 | 轮换层可视化编辑 + 搜索、修复面板位置与 vh 单位、过滤循环引用 |
 | 1.6.3 | 待定 | Qoder 36 模型（含 QoDuck）、耗率带单位、过滤 null 模型 |
 | 1.6.2 | 待定 | 插件描述更新：66 个模型、多账号、余额、WebUI |
 | 1.6.1 | 待定 | 移除第三方二维码、vault uid 去重、qoder 真实名称、hidden 修复 |

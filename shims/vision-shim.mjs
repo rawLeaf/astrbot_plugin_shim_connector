@@ -557,6 +557,83 @@ const server = createServer((req, res) => {
     return;
   }
   // 重置健康分（所有目标回到初始值）
+
+  // 可用目标列表（供 WebUI 打勾）
+  //
+  // 返回三样东西：
+  //   1. current —— 当前生效的 target id（顺序即优先级）
+  //   2. available —— cmd_config.json 里所有能用的 provider（可勾选池）
+  //   3. health —— 每个 target 的健康分
+  if (req.method === "GET" && (url === "/targets" || url.startsWith("/targets?"))) {
+    try {
+      const savedHealth = loadHealth();
+      const raw = readFileSync(CONFIG_FILE, "utf8").replace(/^\uFEFF/, "");
+      const doc = JSON.parse(raw);
+      const providers = Array.isArray(doc.provider) ? doc.provider : [];
+      const sources = Array.isArray(doc.provider_sources) ? doc.provider_sources : [];
+      const bySource = new Map(sources.map((s) => [s.id, s]));
+
+      // 所有「能当轮换目标」的 provider：必须有 api_base
+      //
+      // 排除会造成循环的 source：
+      //   vision / llm_pool 是轮换层，如果互相引用就会死循环
+      //   （vision → llm_pool → vision → ...）
+      const EXCLUDED_SOURCES = new Set(["vision", "llm_pool", "vision_rotator", "vision_shim", "llm-pool"]);
+
+      const available = [];
+      for (const p of providers) {
+        if (!p || typeof p.id !== "string") continue;
+        if (p.enable === false) continue;
+        const srcId = String(p.provider_source_id || "");
+        // 过滤轮换层自身，防止循环
+        if (EXCLUDED_SOURCES.has(srcId)) continue;
+        if (/^(vision|llm_pool|vision_rotator)\//.test(p.id)) continue;
+        const s = bySource.get(srcId);
+        if (!s || !s.api_base) continue;
+        const keys = Array.isArray(s.key) ? s.key : [];
+        if (keys.length === 0) continue;
+        available.push({
+          id: p.id,
+          model: p.model ?? p.id,
+          source: p.provider_source_id,
+          apiBase: String(s.api_base).replace(/\/$/, ""),
+          hasKey: keys.length > 0,
+          current: targets.some((t) => t.id === p.id),
+          score: typeof savedHealth[p.id] === "number" ? savedHealth[p.id] : null,
+        });
+      }
+      available.sort((a, b) => a.id.localeCompare(b.id));
+
+      // 与 /healthz 用同一套排序（自动调节时按健康分降序 + 原始优先级）
+      const ordered = AUTO_TUNE && STRATEGY !== "roundrobin"
+        ? targets.slice().sort((a, b) => (b.score - a.score) || (a.baseRank - b.baseRank))
+        : targets;
+
+      sendJson(res, 200, {
+        ok: true,
+        strategy: STRATEGY,
+        current: ordered.map((t, i) => ({
+          id: t.id,
+          rank: i + 1,
+          baseRank: t.baseRank + 1,
+          model: t.model,
+          score: t.score,
+          ok: t.okCount,
+          fail: t.failCount,
+          cooling: t.cooldownUntil > Date.now(),
+          degraded: t.failCount >= FAIL_THRESHOLD,
+        })),
+        available,
+        total: available.length,
+        usingDefault: TARGETS_ENV.trim() === "",
+        defaultIds: ["workbuddy_shim/minimax-m3.1-flash","workbuddy_intl/minimax-m3.1-flash","zhipu_vision","intern_qwen_vision","qoder_shim/qoder-cn/gfmodel"],
+      });
+    } catch (e) {
+      sendError(res, 500, String(e), "internal");
+    }
+    return;
+  }
+
   // 耗费统计
   if (req.method === "GET" && (url === "/cost" || url.startsWith("/cost?"))) {
     sendJson(res, 200, buildCostResponse());

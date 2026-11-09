@@ -1605,6 +1605,8 @@ class ShimConnector(Star):
             ("catalog", self._api_catalog, ["GET"], "聚合三家的完整名册（含成本/勾选/顺序）"),
             ("select-models", self._api_select_models, ["POST"], "保存模型勾选与顺序"),
             ("auto-tune", self._api_auto_tune, ["GET", "POST"], "读/写自动调节开关"),
+            ("rotation-targets", self._api_rotation_targets, ["GET"], "轮换层的候选目标"),
+            ("rotation-save", self._api_rotation_save, ["POST"], "保存轮换目标与顺序"),
             ("models", self._api_models, ["GET"], "单家官方模型名册"),
             ("cost", self._api_cost, ["GET"], "耗费统计"),
             ("cost/reset", self._api_cost_reset, ["POST"], "重置耗费统计"),
@@ -2062,6 +2064,108 @@ class ShimConnector(Star):
 
 
     # ── 模型名册与耗费 ────────────────────────────────────────
+
+    async def _api_rotation_targets(self):
+        """列出某个轮换层的候选目标（供 WebUI 勾选与排序）。
+
+        查询参数：?name=vision|llm_pool
+        """
+
+        async def handler():
+            name = "vision"
+            if _quart_request is not None:
+                try:
+                    name = str(_quart_request.args.get("name") or "vision").strip()
+                except Exception:  # noqa: BLE001
+                    pass
+            self._require_name(name)
+            data = await self._proxy_shim(name, "/targets")
+            return {"ok": True, "name": name, **data}
+
+        try:
+            return await self._api_response(await handler())
+        except (ValueError, RuntimeError) as exc:
+            return await self._api_response({"ok": False, "message": str(exc)}, 400)
+
+    async def _api_rotation_save(self):
+        """保存轮换目标与顺序，然后重启该 shim 让新配置生效。
+
+        请求体：
+            {
+              "name": "vision",                    // vision | llm_pool
+              "priority": ["id1", "id2"],          // 顺序即优先级，空数组 = 用内置默认
+              "strategy": "priority" | "roundrobin"
+            }
+        """
+
+        async def handler():
+            body = await self._api_body()
+            name = str(body.get("name") or "vision").strip()
+            self._require_name(name)
+
+            priority = body.get("priority")
+            if priority is None or not isinstance(priority, list):
+                raise ValueError("priority 必须是数组")
+            cleaned = [str(x).strip() for x in priority if str(x).strip()]
+
+            strategy = str(body.get("strategy") or "").strip().lower()
+            if strategy not in ("", "priority", "roundrobin"):
+                raise ValueError("strategy 只能是 priority 或 roundrobin")
+
+            section = self.config.setdefault(name, {})
+            section["priority"] = cleaned
+            if strategy != "":
+                section["strategy"] = strategy
+
+            conf_path = self._conf_file_path()
+            try:
+                conf_path.write_text(
+                    json.dumps(self.config, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(f"写配置失败: {exc}") from exc
+
+            logger.info(
+                f"[shim_connector] {name} 轮换目标已保存："
+                f"{len(cleaned)} 个（{', '.join(cleaned[:3])}{'...' if len(cleaned) > 3 else ''}）"
+            )
+
+            # 重启 shim 让新的 TARGETS 生效
+            restarted = False
+            restart_error = ""
+            try:
+                try:
+                    await self._do_stop(name)
+                except RuntimeError:
+                    pass  # 没在跑也允许，等于直接启动
+                await self._do_start(name)
+                restarted = True
+                logger.info(f"[shim_connector] {name} 已重启，新目标生效")
+            except Exception as exc:  # noqa: BLE001
+                restart_error = str(exc)
+                logger.warning(
+                    f"[shim_connector] {name} 重启失败（配置已保存，手动重启可生效）: {exc}"
+                )
+
+            return {
+                "ok": True,
+                "name": name,
+                "priority": cleaned,
+                "strategy": section.get("strategy") or "priority",
+                "restarted": restarted,
+                "restartError": restart_error,
+                "hint": (
+                    "已保存并重启，新目标立即生效。"
+                    if restarted
+                    else f"配置已保存，但重启失败：{restart_error}。手动重启该 shim 可生效。"
+                ),
+            }
+
+        try:
+            return await self._api_response(await handler())
+        except (ValueError, RuntimeError) as exc:
+            return await self._api_response({"ok": False, "message": str(exc)}, 400)
 
     async def _api_models(self):
         """查上游官方模型名册（走 shim 的 /v3/models）。

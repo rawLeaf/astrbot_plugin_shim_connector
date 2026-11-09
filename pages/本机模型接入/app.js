@@ -30,6 +30,13 @@ const state = {
   tab: "accounts",
   shim: "workbuddy",
   qoderRegion: "all",   // all | cn | global
+  rotShim: "vision",
+  rotCurrent: [],       // 当前参与轮换的 id 列表（顺序即优先级）
+  rotAvailable: [],     // 全部候选
+  rotStrategy: "priority",
+  search: { rot: "", rotAvail: "" },
+  costCache: null,
+  rotDetail: null,
   costShim: "workbuddy",
   accounts: { cn: [], global: [] },
   activeRegion: "cn",
@@ -215,6 +222,49 @@ function prettyModelName(id, display) {
 function fmtLatency(ms) {
   if (ms === null || ms === undefined) return '<span class="unknown">-</span>';
   return ms + "ms";
+}
+
+/* ---------- 搜索 ---------- */
+
+/** 取某个搜索框的当前值（小写）。 */
+function searchTerm(key) {
+  const el = q("#" + key + "Search");
+  return el ? String(el.value || "").trim().toLowerCase() : "";
+}
+
+/**
+ * 判断一项是否匹配搜索词。
+ * 任意一个字段包含关键词就算命中（大小写不敏感）。
+ */
+function matchesSearch(term, ...fields) {
+  if (!term) return true;
+  for (const f of fields) {
+    if (f === null || f === undefined) continue;
+    if (String(f).toLowerCase().includes(term)) return true;
+  }
+  return false;
+}
+
+/** 绑定搜索框：输入即重渲染（防抖 120ms）。 */
+function bindSearch(key, rerender) {
+  const el = q("#" + key + "Search");
+  if (!el) return;
+  let timer = null;
+  el.addEventListener("input", () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      state.search[key] = el.value.trim().toLowerCase();
+      rerender();
+    }, 120);
+  });
+  // ESC 清空
+  el.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      el.value = "";
+      state.search[key] = "";
+      rerender();
+    }
+  });
 }
 
 /* ---------- 账号池 ---------- */
@@ -678,50 +728,59 @@ async function loadCost() {
   list.innerHTML = '<div class="empty">加载中…</div>';
   try {
     const r = await apiGet("cost", { name: state.costShim });
-    const summary = q("#costSummary");
+    state.costCache = r;      // 缓存供搜索重渲染
+    renderCost();
+  } catch (e) {
+    list.innerHTML = '<div class="empty">加载失败：' + e.message + '</div>';
+  }
+}
 
-    // 当前账号卡
-    const cur = r.currentAccount;
-    const curHtml = cur
-      ? `<div class="cost-card highlight">
-           <div class="label">当前账号</div>
-           <div class="value" style="font-size:15px">${cur.nickname || cur.accountId.slice(0, 12)}</div>
-           <div class="label" style="margin-top:6px">
-             有效期${cur.remainDays !== null ? " " + cur.remainDays + " 天" : "未知"}
-             · 池内 ${r.accountCount || 0} 个账号
-           </div>
-         </div>`
-      : "";
+/** 用缓存数据渲染耗费页（搜索时复用，不重新请求）。 */
+function renderCost() {
+  const r = state.costCache;
+  if (!r) return;
 
-    summary.innerHTML = curHtml + `
-      <div class="cost-card"><div class="label">本机累计耗费</div><div class="value">${(r.totalCredit ?? 0).toFixed(4)}</div></div>
-      <div class="cost-card"><div class="label">总调用</div><div class="value">${r.totalCalls ?? 0}</div></div>
-      <div class="cost-card"><div class="label">失败</div><div class="value">${r.totalFails ?? 0}</div></div>
-    `;
+  const list = q("#costList");
+  const summary = q("#costSummary");
 
-    // 按账号统计
-    const accRows = r.byAccount || [];
-    if (accRows.length > 0) {
-      list.innerHTML = '<div class="cost-section-title">按账号</div>' + accRows.map(x => `
-        <div class="cost-row">
-          <span class="cid">${x.accountId === "unknown" ? "(桌面端)" : x.accountId.slice(0, 20)}</span>
-          <span class="num">${x.calls} 次</span>
-          <span class="num ${x.credit > 0 ? "big" : ""}">${x.credit.toFixed(4)}</span>
-          <span class="num"></span>
-          <span class="num"></span>
-        </div>
-      `).join("");
-    }
+  // ── 汇总卡（不受搜索影响）──
+  const cur = r.currentAccount;
+  const curHtml = cur
+    ? `<div class="cost-card highlight">
+         <div class="label">当前账号</div>
+         <div class="value" style="font-size:15px">${cur.nickname || cur.accountId.slice(0, 12)}</div>
+         <div class="label" style="margin-top:6px">
+           有效期${cur.remainDays !== null ? " " + cur.remainDays + " 天" : "未知"}
+           · 池内 ${r.accountCount || 0} 个账号
+         </div>
+       </div>`
+    : "";
 
+  summary.innerHTML = curHtml + `
+    <div class="cost-card"><div class="label">本机累计耗费</div><div class="value">${(r.totalCredit ?? 0).toFixed(4)}</div></div>
+    <div class="cost-card"><div class="label">总调用</div><div class="value">${r.totalCalls ?? 0}</div></div>
+    <div class="cost-card"><div class="label">失败</div><div class="value">${r.totalFails ?? 0}</div></div>
+  `;
 
-    const rows = r.byModel || [];
-    if (rows.length === 0) {
-      if (accRows.length === 0) {
-        list.innerHTML = '<div class="empty">还没有调用记录</div>';
-      }
-      return;
-    }
-    const modelHtml = '<div class="cost-section-title">按模型</div>' + rows.map(x => `
+  const accRows = r.byAccount || [];
+  const rows = r.byModel || [];
+
+  let html = "";
+
+  if (accRows.length > 0) {
+    html += '<div class="cost-section-title">按账号</div>' + accRows.map(x => `
+      <div class="cost-row">
+        <span class="cid">${x.accountId === "unknown" ? "(桌面端)" : x.accountId.slice(0, 20)}</span>
+        <span class="num">${x.calls} 次</span>
+        <span class="num ${x.credit > 0 ? "big" : ""}">${x.credit.toFixed(4)}</span>
+        <span class="num"></span>
+        <span class="num"></span>
+      </div>
+    `).join("");
+  }
+
+  if (rows.length > 0) {
+    html += '<div class="cost-section-title">按模型</div>' + rows.map(x => `
       <div class="cost-row">
         <span class="cid">${x.model}</span>
         <span class="num">${x.calls} 次</span>
@@ -730,10 +789,13 @@ async function loadCost() {
         <span class="num">${x.free ? '<span class="free">免费</span>' : ""}</span>
       </div>
     `).join("");
-    list.innerHTML = (list.innerHTML || "") + modelHtml;
-  } catch (e) {
-    list.innerHTML = '<div class="empty">加载失败：' + e.message + '</div>';
   }
+
+  if (!html) {
+    html = '<div class="empty">还没有调用记录</div>';
+  }
+
+  list.innerHTML = html;
 }
 
 async function resetCost() {
@@ -745,6 +807,184 @@ async function resetCost() {
   } catch (e) { notice("重置失败：" + e.message, "err"); }
 }
 
+
+/* ---------- 轮换层 ---------- */
+
+async function loadRotation() {
+  const list = q("#rotList");
+  list.innerHTML = '<div class="empty">加载中…</div>';
+  q("#rotStatus").textContent = "";
+
+  try {
+    const r = await apiGet("rotation-targets", { name: state.rotShim });
+
+    state.rotCurrent = (r.current || []).map(x => x.id);
+    state.rotAvailable = r.available || [];
+    state.rotStrategy = r.strategy || "priority";
+
+    // 当前顺序的详细信息（分数、成功失败数）
+    const detail = new Map((r.current || []).map(x => [x.id, x]));
+
+    // 状态行
+    const usingDefault = r.usingDefault === true;
+    q("#rotStatus").innerHTML = usingDefault
+      ? '<span style="color:var(--warn)">当前用内置默认列表（配置里 priority 为空）</span>'
+      : `<span style="color:var(--ok)">当前用自定义列表</span>`;
+
+    state.rotDetail = detail;
+    renderRotation(detail);
+  } catch (e) {
+    list.innerHTML = '<div class="empty">加载失败：' + e.message + '</div>';
+  }
+}
+
+function renderRotation(detail) {
+  const list = q("#rotList");
+  const cur = state.rotCurrent;
+  const det = detail || state.rotDetail || new Map();
+  state.rotDetail = det;
+
+  if (cur.length === 0) {
+    list.innerHTML = '<div class="empty">还没有选中的目标。展开下面列表添加。</div>';
+    q("#rotCount").textContent = "";
+    return;
+  }
+
+  const rotTerm = state.search.rot;
+  // 搜索时保留原始索引，方便 ↑↓ 操作用对位置
+  const indexed = cur.map((id, idx) => ({ id, idx }));
+  const shownRows = rotTerm
+    ? indexed.filter(r => matchesSearch(rotTerm, r.id))
+    : indexed;
+
+  if (shownRows.length === 0) {
+    list.innerHTML = '<div class="empty">没有匹配「' + rotTerm + '」的目标</div>';
+    q("#rotCount").textContent = `已选 ${cur.length} 个`;
+    return;
+  }
+
+  const rows = shownRows.map(({ id, idx }) => {
+    const d = det.get(id);
+    const ok = d ? (d.ok || 0) : 0;
+    const fail = d ? (d.fail || 0) : 0;
+    const score = d ? Math.round(d.score) : null;
+    const total = ok + fail;
+    const rate = total > 0 ? Math.round(ok / total * 100) : null;
+
+    // 分数颜色
+    const level = score === null ? "" : (score >= 80 ? "ok" : (score >= 50 ? "warn" : "err"));
+    const badges = [];
+    if (d && d.cooling) badges.push('<span class="badge warn">冷却</span>');
+    if (d && d.degraded) badges.push('<span class="badge err">降级</span>');
+
+    return `
+      <div class="rot-row">
+        <span class="rot-rank">${idx + 1}</span>
+        <span class="rot-id">${id}${badges.join("")}</span>
+        <span class="rot-stat">
+          ${rate !== null ? `${rate}% (${ok}/${total})` : '<span class="unknown">未测</span>'}
+        </span>
+        <span class="rot-score ${level}">${score !== null ? score : "-"}</span>
+        <span class="rot-actions">
+          <button class="rot-btn" data-up="${idx}" type="button" ${idx === 0 ? "disabled" : ""}>↑</button>
+          <button class="rot-btn" data-down="${idx}" type="button" ${idx === cur.length - 1 ? "disabled" : ""}>↓</button>
+          <button class="rot-btn danger" data-remove="${idx}" type="button">×</button>
+        </span>
+      </div>
+    `;
+  });
+
+  list.innerHTML = rows.join("");
+  q("#rotCount").textContent = `已选 ${cur.length} 个`;
+
+  // 绑定
+  qa("[data-up]").forEach(b => {
+    b.onclick = () => {
+      const i = Number(b.dataset.up);
+      if (i <= 0) return;
+      [state.rotCurrent[i - 1], state.rotCurrent[i]] = [state.rotCurrent[i], state.rotCurrent[i - 1]];
+      renderRotation(det);
+    };
+  });
+  qa("[data-down]").forEach(b => {
+    b.onclick = () => {
+      const i = Number(b.dataset.down);
+      if (i >= state.rotCurrent.length - 1) return;
+      [state.rotCurrent[i], state.rotCurrent[i + 1]] = [state.rotCurrent[i + 1], state.rotCurrent[i]];
+      renderRotation(det);
+    };
+  });
+  qa("[data-remove]").forEach(b => {
+    b.onclick = () => {
+      state.rotCurrent.splice(Number(b.dataset.remove), 1);
+      renderRotation(det);
+    };
+  });
+
+  renderRotationAvailable();
+}
+
+function renderRotationAvailable() {
+  const box = q("#rotAvail");
+  if (!box) return;
+
+  const inUse = new Set(state.rotCurrent);
+  const term = state.search.rotAvail;
+  let others = state.rotAvailable.filter(a => !inUse.has(a.id));
+  if (term) others = others.filter(a => matchesSearch(term, a.id, a.source, a.model));
+
+  if (others.length === 0) {
+    box.innerHTML = '<div class="empty" style="padding:16px">'
+      + (term ? "没有匹配「" + term + "」的候选" : "没有更多候选了") + '</div>';
+    return;
+  }
+
+  box.innerHTML = others.map(a => `
+    <label class="rot-avail-row">
+      <input type="checkbox" data-add="${a.id}" />
+      <span class="rot-avail-id">${a.id}</span>
+      <span class="rot-avail-src">${a.source}</span>
+    </label>
+  `).join("");
+
+  qa("[data-add]").forEach(cb => {
+    cb.onchange = () => {
+      if (cb.checked) {
+        state.rotCurrent.push(cb.dataset.add);
+        renderRotation();
+      }
+    };
+  });
+}
+
+async function saveRotation() {
+  const btn = q("#rotSave");
+  btn.disabled = true;
+  btn.textContent = "保存中…";
+
+  try {
+    const r = await apiPost("rotation-save", {
+      name: state.rotShim,
+      priority: state.rotCurrent,
+      strategy: state.rotStrategy,
+    });
+
+    if (r.restarted) {
+      notice(`已保存并重启 ${state.rotShim}，新顺序立即生效`, "ok", 5000);
+    } else {
+      notice(`配置已保存，但重启失败：${r.restartError || "未知"}`, "warn", 8000);
+    }
+
+    await new Promise(res => setTimeout(res, 2500));
+    await loadRotation();
+  } catch (e) {
+    notice("保存失败：" + e.message, "err", 6000);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "保存并重启";
+  }
+}
+
 /* ---------- 初始化 ---------- */
 
 function switchTab(name) {
@@ -753,10 +993,12 @@ function switchTab(name) {
   q("#panel-accounts").hidden = name !== "accounts";
   q("#panel-models").hidden = name !== "models";
   q("#panel-cost").hidden = name !== "cost";
+  q("#panel-rotation").hidden = name !== "rotation";
 
   if (name === "accounts") loadAccounts();
   if (name === "models") loadModels();
   if (name === "cost") loadCost();
+  if (name === "rotation") loadRotation();
 }
 
 async function init() {
@@ -795,6 +1037,21 @@ async function init() {
     renderModels();
   };
   q("#reloadCost").onclick = loadCost;
+  // 搜索框（只有轮换层）
+  bindSearch("rot", () => renderRotation());
+  bindSearch("rotAvail", renderRotationAvailable);
+
+  q("#rotReload").onclick = loadRotation;
+  q("#rotToggleScroll").onclick = () => {
+    const list = q("#rotList");
+    const expanded = list.classList.toggle("expanded");
+    q("#rotToggleScroll").textContent = expanded ? "折叠" : "展开全部";
+  };
+  q("#rotSave").onclick = saveRotation;
+  q("#rotSelect").onchange = (e) => {
+    state.rotShim = e.target.value;
+    loadRotation();
+  };
   q("#resetCost").onclick = resetCost;
 
   await loadAccounts();

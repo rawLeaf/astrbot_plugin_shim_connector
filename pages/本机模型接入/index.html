@@ -20,6 +20,7 @@
       <button class="tab active" data-tab="accounts" type="button">账号池</button>
       <button class="tab" data-tab="models" type="button">模型名册</button>
       <button class="tab" data-tab="cost" type="button">耗费</button>
+      <button class="tab" data-tab="rotation" type="button">轮换层</button>
     </nav>
 
     <!-- 账号池 -->
@@ -142,7 +143,51 @@
         <div class="empty">加载中…</div>
       </div>
     </section>
+  <!-- 轮换层 -->
+  <section class="panel" id="panel-rotation" hidden>
+    <div class="panel-head">
+      <h2>轮换层</h2>
+      <div class="row">
+        <select id="rotSelect" class="select">
+          <option value="vision">视觉轮换 vision</option>
+          <option value="llm_pool">LLM 池 llm_pool</option>
+        </select>
+        <button class="btn" id="rotReload" type="button">重新加载</button>
+      </div>
+    </div>
+    <p class="hint">
+      勾选参与轮换的模型，用 ↑↓ 调顺序（靠前的先用）。
+      保存后会重启该 shim，新顺序立即生效。
+    </p>
+
+    <div class="rot-status" id="rotStatus"></div>
+
+    <div class="rot-toolbar">
+      <input type="search" class="search-input" id="rotSearch" placeholder="搜索目标…" />
+      <span class="rot-count" id="rotCount"></span>
+      <div class="row">
+        <button class="btn" id="rotToggleScroll" type="button">展开全部</button>
+        <button class="btn primary" id="rotSave" type="button">保存并重启</button>
+      </div>
+    </div>
+
+    <div class="rot-list" id="rotList">
+      <div class="empty">加载中…</div>
+    </div>
+
+    <details class="manual" id="rotAvailBox">
+      <summary>添加更多候选（来自当前 AstrBot 的全部 provider）</summary>
+      <div class="hint" style="margin-top:8px">
+        下面列出所有可用的 provider。/ 表示它是某个 shim 注册的模型。
+      </div>
+      <input type="search" class="search-input" id="rotAvailSearch" placeholder="搜索候选…" style="margin-top:10px" />
+      <div class="rot-avail" id="rotAvail"></div>
+    </details>
+  </section>
+
   </main>
+
+
 
   <!-- 检测/导入弹窗 -->
   <div class="modal" id="scanModal" hidden>

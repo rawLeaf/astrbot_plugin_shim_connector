@@ -30,7 +30,7 @@ description: >-
   五个 shim 都有 /cost 耗费统计，按模型 + 按账号两个维度。
 
 
-version: "1.6.3"
+version: "1.6.4"
 repo: "https://github.com/rawLeaf/astrbot_plugin_shim_connector"
 homepage: "https://github.com/rawLeaf/astrbot_plugin_shim_connector"
 license: "MIT"
