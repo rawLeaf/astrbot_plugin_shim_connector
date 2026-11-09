@@ -243,18 +243,23 @@ function loadTargets() {
   const bySource = new Map(sources.map((s) => [s.id, s]));
 
   const out = [];
+  const skipped = [];
   for (const [idx, id] of TARGET_IDS.entries()) {
     const p = providers.find((x) => x.id === id);
     if (!p) {
-      console.error("[llm-pool] 跳过（provider 不存在）: " + id);
+      skipped.push({ id, why: "provider 不存在" });
       continue;
     }
     const s = bySource.get(p.provider_source_id);
     if (!s || !s.api_base) {
-      console.error("[llm-pool] 跳过（无 api_base）: " + id);
+      skipped.push({ id, why: "provider_source 没有 api_base" });
       continue;
     }
     const keys = Array.isArray(s.key) ? s.key : [];
+    if (keys.length === 0) {
+      skipped.push({ id, why: "没有 api key" });
+      continue;
+    }
     out.push({
       id,
       base: String(s.api_base).replace(/\/$/, ""),
@@ -273,6 +278,19 @@ function loadTargets() {
       timeoutStreak: 0,
     });
   }
+
+  // 汇总提示：被跳过的通常是「配置里留着但 provider 已删」的 id
+  if (skipped.length > 0) {
+    console.error(
+      "[llm-pool] " + skipped.length + " 个目标被跳过（配置里有但用不了）："
+    );
+    for (const s of skipped) {
+      console.error("  ✗ " + s.id + "  —— " + s.why);
+    }
+    console.error("[llm-pool] 如果这些是别人配置里的 provider，忽略即可；");
+    console.error("[llm-pool] 想清理就在 WebUI 的「轮换层」里删掉它们。");
+  }
+
   return out;
 }
 

@@ -7,6 +7,103 @@
 
 ---
 
+## [1.6.5] — 2026-11-09
+
+### 新增：轮换层说明与跳过提示
+
+用户反馈两个问题：不知道「轮换层」是干什么的；配置里有些目标调不通但没有提示。
+
+#### 轮换层说明框
+
+轮换层顶部加可展开说明，讲清三件事：
+
+- **它是一层中间代理**：把多个上游包成一个虚拟模型名（`vision-auto` / `llm-pool-auto`）
+- **vision 用于图片理解**，**llm_pool 用于纯文本对话**
+- **列表是「备选顺序」**：靠前先用，失败才降级；健康分会自动影响顺序
+
+并明确提示：
+
+> 默认列表里的 `zhipu_vision` / `intern_qwen_vision` 是自己配的第三方 provider。
+> **如果你没建过这些，它们会被自动跳过**（启动日志会提示），不影响使用。
+> 想清理就在这里删掉。
+
+候选区也加了说明：列出的是当前 AstrBot 所有可调 provider，
+轮换层自身已排除（避免死循环）。
+
+#### 启动日志的跳过提示
+
+之前 `loadTargets()` 静默跳过不存在的 provider，用户不知道为什么目标数变少。
+
+现在会汇总打印：
+
+```
+[vision-shim] 1 个目标被跳过（在配置里但用不了）：
+  ✗ zhipu_vision  —— provider 不存在
+[vision-shim] 如果这些是别人配置里的 provider，忽略即可；
+[vision-shim] 想清理就在 WebUI 的「轮换层」里删掉它们。
+```
+
+三种跳过原因分开标注：
+
+| 原因 | 说明 |
+|---|---|
+| `provider 不存在` | 配置里有 id，但 AstrBot 里没这个 provider |
+| `provider_source 没有 api_base` | provider 在，但它的 source 没配地址 |
+| `没有 api key` | source 有地址但缺密钥 |
+
+### 说明：用户的配置不会泄露给其他人
+
+有用户问「轮换层会不会把我的本地配置硬编码进去」。
+
+**不会。** 三层分离：
+
+| 位置 | 内容 | 会打包吗 |
+|---|---|---|
+| 用户本地配置 `astrbot_plugin_shim_connector_config.json` | 自己的 23 / 15 个目标 | ❌ 不在仓库 |
+| `_conf_schema.json` 的 `priority` 默认值 | `[]`（空数组） | ✅ 但空的 |
+| shim 代码的 `DEFAULT_TARGET_IDS` | 5 个 / 10 个通用默认 | ✅ 但这些是公开的 |
+
+新用户装完默认拿到的是内建 shim 自带的模型（如 `workbuddy_shim/minimax-m3.1-flash`），
+外加几个需要自己建的（`zhipu_vision` 等，会被自动跳过）。
+
+前端 HTML / app.js 里**没有任何硬编码的 provider id**，
+全部由 `/targets` 接口动态返回。
+
+### 清理：本地运行时缓存
+
+删除了 11 个本地缓存文件（26KB）：
+
+| 文件 | 内容 |
+|---|---|
+| `.wb-cost.json` | WorkBuddy 耗费统计 |
+| `.trae-cost.json` | Trae 耗费统计 |
+| `.qoder-cost.json` | Qoder 耗费统计 |
+| `.vision-cost.json` | 视觉轮换耗费 |
+| `.llm-pool-cost.json` | LLM 池耗费 |
+| `.vision-health.json` | 视觉健康分 |
+| `.llm-pool-health.json` | LLM 池健康分 |
+| `.wb-models.json` | 模型探测缓存 |
+| `vision-shim.mjs.bak-*` | 旧代码备份 |
+
+**保留** `shims/.vault/`（5 个账号的凭据）。
+
+这些文件都在 `.gitignore` 里，本来就不会被提交。
+
+### 验证
+
+| 检查 | 结果 |
+|---|---|
+| 说明文案 | ✅ 5 处全有 |
+| 跳过提示 | ✅ vision + llm_pool |
+| 缓存残留 | ✅ 全部清空 |
+| vault 完好 | ✅ 5 个账号 |
+| 5 个 shim 语法 | ✅ |
+| 部署一致 | ✅ |
+| 接口正常 | ✅ vision 23 / llm_pool 15，候选 128 |
+| 安全扫描 | ✅ 干净 |
+
+---
+
 ## [1.6.4] — 2026-11-09
 
 ### 新增：轮换层可视化编辑
@@ -2023,6 +2120,7 @@ Trae 实测真实对话返回正常（`DeepSeek-V4-Flash-Official`）。
 
 | 版本 | commit | 要点 |
 |---|---|---|
+| 1.6.5 | 待定 | 轮换层说明 + 跳过提示、清理本地缓存 |
 | 1.6.4 | 待定 | 轮换层可视化编辑 + 搜索、修复面板位置与 vh 单位、过滤循环引用 |
 | 1.6.3 | 待定 | Qoder 36 模型（含 QoDuck）、耗率带单位、过滤 null 模型 |
 | 1.6.2 | 待定 | 插件描述更新：66 个模型、多账号、余额、WebUI |

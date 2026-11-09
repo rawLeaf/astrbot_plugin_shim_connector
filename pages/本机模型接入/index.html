@@ -155,6 +155,30 @@
         <button class="btn" id="rotReload" type="button">重新加载</button>
       </div>
     </div>
+    <details class="explain-box" open style="margin-bottom:14px">
+      <summary>「轮换层」是干什么的？</summary>
+      <div class="explain-body">
+        <p><strong>它是一层中间代理，把多个上游模型包成一个虚拟模型。</strong>
+        调用方只需要认一个模型名（<code>vision-auto</code> 或 <code>llm-pool-auto</code>），
+        由它自动挑一个真实上游发出去。</p>
+
+        <p><strong>视觉轮换 vision</strong>：任一上游挂了/超时，自动换下一个，
+        调用方不会看到失败。用于图片理解场景。</p>
+
+        <p><strong>通用 LLM 池 llm_pool</strong>：同理，但用于纯文本对话。
+        可以把 Trae / WorkBuddy / Qoder 的模型混在一起做兜底。</p>
+
+        <p><strong>下面的列表就是「备选顺序」</strong>：靠前的先用，失败了才降级到后面。
+        健康分会自动影响顺序（长期失败的自动沉底），但基础顺序由这里决定。</p>
+
+        <p class="explain-note">
+          ⚠️ 默认列表里的 <code>zhipu_vision</code> / <code>intern_qwen_vision</code>
+          是自己配的第三方 provider。<strong>如果你没建过这些，它们会被自动跳过</strong>
+          （启动日志会提示），不影响使用。想清理就在这里删掉。
+        </p>
+      </div>
+    </details>
+
     <p class="hint">
       勾选参与轮换的模型，用 ↑↓ 调顺序（靠前的先用）。
       保存后会重启该 shim，新顺序立即生效。
@@ -178,7 +202,11 @@
     <details class="manual" id="rotAvailBox">
       <summary>添加更多候选（来自当前 AstrBot 的全部 provider）</summary>
       <div class="hint" style="margin-top:8px">
-        下面列出所有可用的 provider。/ 表示它是某个 shim 注册的模型。
+        下面列出当前 AstrBot 里所有能调的 provider（共 128 个）。
+        <br />
+        <code>workbuddy_shim/xxx</code> 这种格式表示「某个 shim 注册的模型」。
+        <br />
+        轮换层自身（vision / llm_pool）已排除，避免自己调自己死循环。
       </div>
       <input type="search" class="search-input" id="rotAvailSearch" placeholder="搜索候选…" style="margin-top:10px" />
       <div class="rot-avail" id="rotAvail"></div>
