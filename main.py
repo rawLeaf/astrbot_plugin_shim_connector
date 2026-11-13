@@ -112,7 +112,7 @@ SHIM_DEFS: dict[str, dict] = {
 }
 
 
-async def port_free_async(port: int, timeout: float = 0.5) -> bool:
+async def port_free_async(port: int, timeout: float = 3.0) -> bool:
     """异步探测端口是否空闲（不阻塞事件循环）。
 
     用 asyncio.open_connection 而不是 socket.connect_ex，
@@ -124,7 +124,24 @@ async def port_free_async(port: int, timeout: float = 0.5) -> bool:
 
     Returns:
         True 表示可以绑定（没人监听）。
-    """
+
+    ⚠️ 2026-11-13 血案：原来默认 0.5 秒，在 Windows 上太短。
+
+    实测（对 8787 有 shim 监听的情况，各测 5 次）：
+
+        timeout=0.5   判定空闲 5/5   ← 全部误判！
+        timeout=1.0   判定空闲 0/5   ✅
+        timeout=3.0   判定空闲 0/5   ✅
+
+    Windows 上到 127.0.0.1 的 TCP 握手在这里要 0.6~1.0 秒，
+    0.5 秒必然超时，于是被当成「端口空闲」。
+
+    后果：看门狗每 30 秒误判所有 shim「未运行」，
+    逐个 spawn 新进程；新进程起来发现端口被占又自己退出，
+    日志里 191 条「已启动」、176 条 WARN，PID 一直在变但服务其实一直正常。
+
+    所以默认值提到 3.0 秒，留足余量。
+    """ 
     try:
         _reader, writer = await asyncio.wait_for(
             asyncio.open_connection("127.0.0.1", port), timeout=timeout
@@ -160,6 +177,22 @@ class ShimConnector(Star):
         self._cfg_mtime: float = 0.0
         self._cfg_watch_task: asyncio.Task | None = None
         self._watchdog_task: asyncio.Task | None = None
+
+        # ⚠️ 2026-11-13 关键修复：Popen 对象被 GC 会杀掉子进程。
+        #
+        # 实测（Windows + Python 3.12）：
+        #   p = subprocess.Popen([...]); del p; gc.collect()
+        #   → 子进程 6 秒后仍然活着，但删除引用后端口立刻断开
+        #
+        # 也就是说：**只要 Popen 对象被回收，Windows 就终止子进程**，
+        # 退出码是 4294967295（0xFFFFFFFF）。
+        #
+        # self.procs 在插件重载后是新实例，旧的 Popen 失去引用被回收，
+        # 于是 5 个 shim 全死；看门狗再拉起，又因为同样原因死掉，
+        # 表现为「每 30 秒全部重建一次」。
+        #
+        # 这个列表持有所有 Popen，保证生命周期内不被 GC。
+        self._proc_keepalive: list = []
         # 记录「上次生效」的启用状态，用于差分
         self._applied: dict[str, bool] = {}
 
@@ -681,6 +714,40 @@ class ShimConnector(Star):
             self._watchdog_task = asyncio.create_task(self._watchdog_loop())
             logger.info("[shim_connector] 看门狗已启动（间隔 30s）")
 
+    def _pid_alive(self, pid: int) -> bool:
+        """判断某个进程是否还活着（Windows / POSIX 通用）。"""
+        if pid <= 0:
+            return False
+        try:
+            if sys.platform == "win32":
+                import ctypes
+                PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+                kernel32 = ctypes.windll.kernel32
+                h = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+                if h == 0:
+                    return False
+                try:
+                    code = ctypes.c_ulong()
+                    if not kernel32.GetExitCodeProcess(h, ctypes.byref(code)):
+                        return False
+                    # STILL_ACTIVE == 259
+                    return code.value == 259
+                finally:
+                    kernel32.CloseHandle(h)
+            os.kill(pid, 0)
+            return True
+        except (OSError, Exception):  # noqa: BLE001
+            return False
+
+    def _saved_pids(self) -> dict[str, int]:
+        """读状态文件里记的 PID。"""
+        try:
+            doc = json.loads(self._state_file().read_text(encoding="utf-8"))
+            raw = doc.get("pids") or {}
+            return {str(k): int(v) for k, v in raw.items() if str(v).isdigit()}
+        except Exception:  # noqa: BLE001
+            return {}
+
     async def _watchdog_loop(self) -> None:
         """每 30 秒检查一次：配置里启用、但端口没在听的 shim，自动拉起。
 
@@ -697,10 +764,43 @@ class ShimConnector(Star):
                 for name in self._all_defs():
                     if not self._effective_enabled(name):
                         continue
+
+                    # ── 判据 1（主）：本插件记录的进程句柄还活着 ──
+                    #
+                    # 这是唯一可靠的判据。端口探测不可靠：
+                    #   - vision / llm_pool 启动时要拉模型名册、并行探测上游，
+                    #     可能 10 秒以上才开始 listen
+                    #   - 这期间端口是空的，但它们明明是「正在启动」而非「未运行」
+                    #   - 之前用端口做判据 → 看门狗每 30 秒误拉一次，
+                    #     新进程与老的抢端口/互相踩，日志里 190+ 条「已启动」
+                    #
+                    # 有句柄且未退出 = 一定在跑，直接跳过。
+                    proc = self.procs.get(name)
+                    if proc is not None and proc.poll() is None:
+                        continue
+
+                    # ── 判据 2（辅）：状态文件里记的 PID 还活着 ──
+                    # 插件重载后 self.procs 是空的，但子进程仍在跑。
+                    # 靠 PID 判断才能认出来，避免重复拉起。
+                    saved_pid = self._saved_pids().get(name, 0)
+                    if saved_pid and self._pid_alive(saved_pid):
+                        logger.debug(
+                            f"[shim_connector] {name} PID {saved_pid} 仍存活，视为在运行"
+                        )
+                        continue
+
+                    # ── 判据 3（辅）：端口有人在听 ──
+                    # 前两个都不成立时才用它。注意 vision / llm_pool
+                    # 启动慢（拉名册、探测上游），端口会晚十几秒才开，
+                    # 所以这一条只作兜底，不能单独依赖。
                     port = self._port(name)
                     if not await port_free_async(port):
+                        logger.debug(
+                            f"[shim_connector] {name} (:{port}) 端口在听但无句柄，视为在运行"
+                        )
                         continue
-                    # 端口空闲 = 该跑没跑，拉起来
+
+                    # ── 两道都不满足，才拉起 ──
                     logger.warning(
                         f"[shim_connector] 看门狗发现 {name} (:{port}) 未运行，自动拉起"
                     )
@@ -767,9 +867,14 @@ class ShimConnector(Star):
                     continue
                 if await self._pid_listening_on_async(port) is not None:
                     alive[name] = port
+        # 同时记下 PID，供下次 initialize / 看门狗用 PID 判断真存活
+        pids: dict[str, int] = {}
+        for name, proc in self.procs.items():
+            if proc is not None and proc.poll() is None:
+                pids[name] = int(proc.pid)
         try:
             self._state_file().write_text(
-                json.dumps({"alive": alive}, ensure_ascii=False),
+                json.dumps({"alive": alive, "pids": pids}, ensure_ascii=False),
                 encoding="utf-8",
             )
         except Exception as exc:  # noqa: BLE001
@@ -934,6 +1039,12 @@ class ShimConnector(Star):
 
     def _stop_shim(self, name: str, proc: subprocess.Popen) -> None:
         """停一个 shim 进程（只影响这一个）。"""
+        # 先解除钉住
+        try:
+            while proc in self._proc_keepalive:
+                self._proc_keepalive.remove(proc)
+        except Exception:  # noqa: BLE001
+            pass
         if proc.poll() is not None:
             return
         try:
@@ -1086,6 +1197,8 @@ class ShimConnector(Star):
             finally:
                 log_file.close()  # 父进程关句柄，子进程仍持有
             self.procs[name] = proc
+            # 钉住引用，防止 Popen 被 GC 导致 Windows 杀掉子进程
+            self._proc_keepalive.append(proc)
             logger.info(
                 f"[shim_connector] 已启动 {name} (:{port}) pid={proc.pid} "
                 f"log={log_path.name}"

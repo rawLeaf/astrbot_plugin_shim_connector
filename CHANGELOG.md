@@ -7,6 +7,91 @@
 
 ---
 
+## [1.7.1] — 2026-11-13
+
+### 修复：看门狗每 30 秒把 5 个 shim 全部重启
+
+1.7.0 引入的看门狗有严重缺陷，用户实测「每 30 秒全部杀掉重建一次」，
+日志累计 **191 次「已启动」、176 条 WARN**，PID 一直变。
+
+#### 根因一：端口探测超时太短
+
+`port_free_async` 默认 `timeout=0.5` 秒。实测（对真实监听的 8787，各测 5 次）：
+
+```
+timeout=0.5   判定空闲 5/5   ← 全部误判
+timeout=1.0   判定空闲 0/5   ✅
+timeout=3.0   判定空闲 0/5   ✅
+```
+
+Windows 上到 `127.0.0.1` 的 TCP 握手要 0.6~1.0 秒，0.5 秒必然超时，
+于是被当成「端口空闲」→ 看门狗以为没跑 → 拉起新进程。
+
+**改为 `timeout=3.0`。**
+
+#### 根因二：端口探测不能当唯一判据
+
+`vision` / `llm_pool` 启动时要拉模型名册、并行探测上游，
+**十几秒后才 listen**。这期间端口是空的，但它们是「正在启动」而非「未运行」。
+
+实测：5 个 shim 全部正常跑起来后，`llm_pool` 仍然被判「未运行」。
+
+#### 修复：改为三重判据，句柄优先
+
+```python
+# 判据 1（主）：本插件记录的进程句柄还活着 → 一定在跑
+proc = self.procs.get(name)
+if proc is not None and proc.poll() is None:
+    continue
+
+# 判据 2：状态文件里记的 PID 还活着（重载后 procs 是空的）
+saved_pid = self._saved_pids().get(name, 0)
+if saved_pid and self._pid_alive(saved_pid):
+    continue
+
+# 判据 3（兜底）：端口在听
+if not await port_free_async(port):
+    continue
+
+# 三个都不成立才拉起
+```
+
+新增 `_pid_alive()`（Windows 用 `OpenProcess` + `GetExitCodeProcess` 判 `STILL_ACTIVE`，
+POSIX 用 `os.kill(pid, 0)`），以及 `_saved_pids()` 读状态文件。
+
+`terminate()` 现在同时记录 PID：
+
+```json
+{ "alive": {...}, "pids": { "workbuddy": 29416, ... } }
+```
+
+#### 附带：`_proc_keepalive` 钉住 Popen 引用
+
+Python 的 `subprocess.Popen` 对象被 GC 时可能连带终止子进程
+（Windows 退出码 `4294967295` = `0xFFFFFFFF`）。
+现在所有 Popen 都存进 `_proc_keepalive` 列表，`_stop_shim` 时移除。
+
+#### 验证
+
+`_pid_alive` 单测：
+
+```
+当前进程 28992: True
+不存在的 999999: False
+杀掉后的 vision PID 6204: False   ✅
+仍在的 workbuddy PID 29416: True  ✅
+```
+
+日志证据（修复后）：
+
+```
+21:49:58  最后一条 WARN
+21:50:58  插件重载，看门狗启动
+21:50:58 之后：0 条 WARN，0 条重启  ✅
+```
+
+---
+
 ## [1.7.0] — 2026-11-13
 
 ### 新增：Trae / Qoder 账号池
