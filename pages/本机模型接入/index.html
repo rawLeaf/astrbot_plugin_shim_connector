@@ -28,18 +28,33 @@
       <div class="panel-head">
         <h2>账号池</h2>
         <div class="row">
+          <div class="shim-tabs" id="accountShimTabs">
+            <button class="shim-tab active" data-acc-shim="workbuddy" type="button">WorkBuddy</button>
+            <button class="shim-tab" data-acc-shim="trae" type="button">Trae</button>
+            <button class="shim-tab" data-acc-shim="qoder" type="button">Qoder</button>
+          </div>
           <label class="switch">
             <input type="checkbox" id="autoTune" />
             <span>自动调序</span>
           </label>
           <button class="btn" id="scanVaults" type="button">检测本地账号</button>
+          <button class="btn" id="refreshBalance" type="button" title="强制回源查余额，绕过 5 分钟缓存">刷新积分</button>
           <button class="btn primary" id="addAccount" type="button" title="仅 WorkBuddy / CodeBuddy 支持扫码登录">WorkBuddy 扫码添加</button>
         </div>
       </div>
       <div class="scope-note">
-        <strong>适用范围</strong>：账号池、扫码登录、余额查询<strong>只对 WorkBuddy 有效</strong>。
+        <strong>适用范围</strong>：账号池现在支持 <strong>WorkBuddy</strong> 和 <strong>Trae</strong>。
+        切换上方的标签页即可管理各自的账号。
         <br />
-        Trae / Qoder / 视觉轮换 / LLM 池 用的是各自客户端里登录的那一个账号，不支持多账号。
+        <strong>Trae 账号池</strong>：点「检测本地账号」会自动扫 dsh-home 的 <code>.trae-auth.cn.json</code>，
+        可以把里面多个账号一次导入。额度用尽会自动换下一个（冷却 30 分钟）。
+        <br />
+        <strong>Qoder 账号池</strong>：分国内（qoder-cn）和国际（qoder）两区，
+        点「检测本地账号」会把桌面端当前登录的账号存进池子。
+        <br />
+        视觉轮换 / LLM 池 仍然是各自客户端里登录的那一个账号。
+        <br />
+        积分默认缓存 5 分钟，点「刷新积分」可立即回源查询。
       </div>
 
       <details class="explain-box" open>
@@ -168,8 +183,18 @@
         <p><strong>通用 LLM 池 llm_pool</strong>：同理，但用于纯文本对话。
         可以把 Trae / WorkBuddy / Qoder 的模型混在一起做兜底。</p>
 
-        <p><strong>下面的列表就是「备选顺序」</strong>：靠前的先用，失败了才降级到后面。
-        健康分会自动影响顺序（长期失败的自动沉底），但基础顺序由这里决定。</p>
+        <p><strong>两个轮换层各用各的顺序，不混用：</strong></p>
+
+        <p><strong>通用 LLM 池 llm_pool</strong>（文本）：跟随主链
+        `fallback_provider_ids`。你在别的程序 / AstrBot 配置页改的那份就是它。
+        在这里调顺序并保存会<strong>同时更新主链</strong>。</p>
+
+        <p><strong>视觉轮换 vision</strong>（图片理解）：用自己独立的
+        `vision.priority`，<strong>不跟随主链</strong>。
+        保存只影响 vision，不动文本 fallback。</p>
+
+        <p>健康分仍会自动影响实际尝试顺序（长期失败的自动沉底），
+        但基础顺序以各自这份为准。</p>
 
         <p class="explain-note">
           ⚠️ 默认列表里的 <code>zhipu_vision</code> / <code>intern_qwen_vision</code>
@@ -202,11 +227,13 @@
     <details class="manual" id="rotAvailBox">
       <summary>添加更多候选（来自当前 AstrBot 的全部 provider）</summary>
       <div class="hint" style="margin-top:8px">
-        下面列出当前 AstrBot 里所有能调的 provider（共 128 个）。
+        下面列出当前 AstrBot 里所有能调的 provider。
         <br />
         <code>workbuddy_shim/xxx</code> 这种格式表示「某个 shim 注册的模型」。
         <br />
         轮换层自身（vision / llm_pool）已排除，避免自己调自己死循环。
+        <br />
+        这里的勾选只影响「添加更多候选」，主链顺序以上方列表为准。
       </div>
       <input type="search" class="search-input" id="rotAvailSearch" placeholder="搜索候选…" style="margin-top:10px" />
       <div class="rot-avail" id="rotAvail"></div>

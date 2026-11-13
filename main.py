@@ -159,6 +159,7 @@ class ShimConnector(Star):
         # 配置热重载：盯配置文件 mtime，变了就差分启停
         self._cfg_mtime: float = 0.0
         self._cfg_watch_task: asyncio.Task | None = None
+        self._watchdog_task: asyncio.Task | None = None
         # 记录「上次生效」的启用状态，用于差分
         self._applied: dict[str, bool] = {}
 
@@ -670,6 +671,46 @@ class ShimConnector(Star):
                 f"[shim_connector] 配置热重载已启用（监视 {conf.name}，间隔 2s）"
             )
 
+        # 启动看门狗：定期检查该跑的 shim 是否还活着，掉了就自动拉起。
+        #
+        # 2026-11-13 起因：AstrBot 重载插件后，shim 子进程可能被系统回收
+        # （terminate 里没杀，但进程还是全没了），用户会看到
+        # 「llm_pool 未在运行（端口 8792 空闲）」。
+        # 有看门狗后最多 30 秒自愈，不用人工去点启动。
+        if self._watchdog_task is None or self._watchdog_task.done():
+            self._watchdog_task = asyncio.create_task(self._watchdog_loop())
+            logger.info("[shim_connector] 看门狗已启动（间隔 30s）")
+
+    async def _watchdog_loop(self) -> None:
+        """每 30 秒检查一次：配置里启用、但端口没在听的 shim，自动拉起。
+
+        只对「启用且确实没跑」的动手；被用户手动临时停用的不动。
+        """
+        while True:
+            try:
+                await asyncio.sleep(30.0)
+                if not self._master_enabled():
+                    continue
+                node = self._node_exe()
+                if node is None:
+                    continue
+                for name in self._all_defs():
+                    if not self._effective_enabled(name):
+                        continue
+                    port = self._port(name)
+                    if not await port_free_async(port):
+                        continue
+                    # 端口空闲 = 该跑没跑，拉起来
+                    logger.warning(
+                        f"[shim_connector] 看门狗发现 {name} (:{port}) 未运行，自动拉起"
+                    )
+                    async with self._lock:
+                        await self._start_shim(name, node, reuse_ok=False)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[shim_connector] 看门狗异常: {exc}")
+
     async def terminate(self):
         """插件重载/卸载时调用。
 
@@ -695,6 +736,16 @@ class ShimConnector(Star):
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
         self._cfg_watch_task = None
+
+        # 停掉看门狗（下一次 initialize 会重新挂）
+        watchdog = getattr(self, "_watchdog_task", None)
+        if watchdog is not None and not watchdog.done():
+            watchdog.cancel()
+            try:
+                await watchdog
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        self._watchdog_task = None
 
         # 记录仍在运行的 shim：名字 -> 当时的端口
         # 为什么要记端口：用户可能改了端口再保存，
@@ -964,7 +1015,10 @@ class ShimConnector(Star):
         for ek, ev in (spec.get("extra_env") or {}).items():
             env[ek] = str(ev)
 
-        # vision：轮换策略与优先级列表
+        # vision：图片理解专用，保持自己的独立顺序
+        #
+        # 2026-11-13 修正：不能跟 llm_pool 共用主链顺序。
+        # vision 是给图片用的，和 AstrBot 文本主链 fallback 不是一回事。
         if name == "vision":
             env["VISION_STRATEGY"] = self._vision_strategy()
             vorder = self._vision_priority()
@@ -978,10 +1032,13 @@ class ShimConnector(Star):
             env["VISION_RECOVER_STEP"] = str(vp["recover_step"])
             env["VISION_INITIAL_SCORE"] = str(vp["initial_score"])
 
-        # llm_pool：轮换策略与优先级列表
+        # llm_pool：文本池，跟随主链 fallback_provider_ids
+        #
+        # 主链就是文本对话兜底，和 llm_pool 语义对应。
+        # 用户在别的程序里改主链顺序，这里要跟着变。
         if name == "llm_pool":
             env["LLM_POOL_STRATEGY"] = self._pool_strategy()
-            order = self._pool_priority()
+            order = self._main_chain_fallback() or self._pool_priority()
             if order:
                 env["LLM_POOL_TARGETS"] = ",".join(order)
             env["LLM_POOL_FAIL_THRESHOLD"] = str(self._pool_fail_threshold())
@@ -1051,6 +1108,66 @@ class ShimConnector(Star):
             pass
         # 兜底：插件在 <AstrBot>/data/plugins/<name>，往上两级是 data/
         return PLUGIN_DIR.parent.parent / "cmd_config.json"
+
+    def _main_chain_fallback(self) -> list[str]:
+        """读 AstrBot 主链的 fallback_provider_ids。
+
+        2026-11-13：**优先读磁盘文件**，不是内存态。
+        因为用户可能在别的程序里直接改 cmd_config.json，
+        而 AstrBot 进程内存里的 default_conf 还是启动时的旧值。
+        读磁盘才能让「外面改的顺序」立刻反映到页面。
+        """
+        try:
+            doc = json.loads(
+                self._astrbot_config_path().read_text(encoding="utf-8-sig")
+            )
+            ids = (
+                doc.get("agent_runner", {})
+                .get("config", {})
+                .get("model", {})
+                .get("fallback_provider_ids", [])
+            )
+            if isinstance(ids, list):
+                return [str(x).strip() for x in ids if str(x).strip()]
+        except Exception:  # noqa: BLE001
+            pass
+        # 兜底：内存态
+        try:
+            conf = self.context.astrbot_config_mgr.default_conf
+            if conf is not None:
+                ids = (
+                    conf.get("agent_runner", {})
+                    .get("config", {})
+                    .get("model", {})
+                    .get("fallback_provider_ids", [])
+                )
+                if isinstance(ids, list):
+                    return [str(x).strip() for x in ids if str(x).strip()]
+        except Exception:  # noqa: BLE001
+            pass
+        return []
+
+    def _write_main_chain_fallback(self, ids: list[str]) -> bool:
+        """把顺序写回 AstrBot 主链的 fallback_provider_ids。
+
+        必须改 default_conf 内存对象再 save_config()，
+        直接写文件会被 AstrBot 内存态覆盖回去。
+        """
+        try:
+            conf = self.context.astrbot_config_mgr.default_conf
+            if conf is None:
+                return False
+            model = (
+                conf.setdefault("agent_runner", {})
+                .setdefault("config", {})
+                .setdefault("model", {})
+            )
+            model["fallback_provider_ids"] = list(ids)
+            conf.save_config()
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[shim_connector] 写主链 fallback 失败: {exc}")
+            return False
 
     def _conf_file_path(self) -> Path:
         """本插件的配置文件路径。
@@ -2080,6 +2197,52 @@ class ShimConnector(Star):
                     pass
             self._require_name(name)
             data = await self._proxy_shim(name, "/targets")
+
+            # 2026-11-13：两个轮换层各用各的顺序，不能混。
+            #   llm_pool（文本池）→ 跟随主链 fallback_provider_ids
+            #   vision（图片理解）→ 保持自己独立的 vision.priority
+            #
+            # 用户在别的程序改主链，只影响 llm_pool，不该把 vision 也带跑。
+            main_chain = self._main_chain_fallback() if name == "llm_pool" else []
+            if main_chain:
+                # 页面只展示主链顺序，不再混入「仅 shim 有」的条目，
+                # 否则列表会被拉得很长、看不出主链到底排了什么。
+                #
+                # shim 当前实际加载的目标用于补充每一行的健康分/成功率；
+                # 主链里有但 shim 没加载的，标 missing=true（灰色提示）。
+                by_id = {x["id"]: x for x in (data.get("current") or [])}
+                reordered = []
+                for i, pid in enumerate(main_chain, 1):
+                    item = by_id.get(pid)
+                    if item is None:
+                        reordered.append({
+                            "id": pid, "rank": i, "model": pid,
+                            "score": None, "ok": 0, "fail": 0,
+                            "cooling": False, "degraded": False,
+                            "missing": True,
+                        })
+                    else:
+                        item = dict(item)
+                        item["rank"] = i
+                        reordered.append(item)
+
+                data = dict(data)
+                data["current"] = reordered
+                data["mainChain"] = main_chain
+                data["orderSource"] = "main_chain"
+                data["orderNote"] = (
+                    "当前显示的是主链 fallback_provider_ids 的顺序；"
+                    "保存会同时更新主链和本插件配置。"
+                )
+            else:
+                data = dict(data)
+                data["orderSource"] = "vision" if name == "vision" else "shim"
+                if name == "vision":
+                    data["orderNote"] = (
+                        "视觉轮换用自己独立的顺序（vision.priority），"
+                        "与文本主链 fallback 无关。保存只更新本插件配置。"
+                    )
+
             return {"ok": True, "name": name, **data}
 
         try:
@@ -2131,6 +2294,21 @@ class ShimConnector(Star):
                 f"{len(cleaned)} 个（{', '.join(cleaned[:3])}{'...' if len(cleaned) > 3 else ''}）"
             )
 
+            # 只有 llm_pool 才写回主链。
+            #
+            # 2026-11-13：vision 是图片理解专用，有自己的独立顺序；
+            # 如果把 vision 的顺序写进 fallback_provider_ids，
+            # 会把 AstrBot 文本主链搞乱，也会让两个轮换层变成同一份。
+            main_synced = False
+            if name == "llm_pool":
+                main_synced = self._write_main_chain_fallback(cleaned)
+                if main_synced:
+                    logger.info(
+                        f"[shim_connector] 已同步主链 fallback_provider_ids：{len(cleaned)} 个"
+                    )
+                else:
+                    logger.warning("[shim_connector] 主链顺序同步失败（插件配置已保存）")
+
             # 重启 shim 让新的 TARGETS 生效
             restarted = False
             restart_error = ""
@@ -2153,10 +2331,15 @@ class ShimConnector(Star):
                 "name": name,
                 "priority": cleaned,
                 "strategy": section.get("strategy") or "priority",
+                "mainSynced": main_synced,
                 "restarted": restarted,
                 "restartError": restart_error,
                 "hint": (
-                    "已保存并重启，新目标立即生效。"
+                    (
+                        ("已保存并重启，且已同步主链顺序。" if main_synced else "已保存并重启（主链同步失败）。")
+                        if name == "llm_pool"
+                        else "已保存并重启（视觉轮换用独立顺序，不影响主链）。"
+                    )
                     if restarted
                     else f"配置已保存，但重启失败：{restart_error}。手动重启该 shim 可生效。"
                 ),
@@ -2470,19 +2653,59 @@ class ShimConnector(Star):
         """扫描 vault 候选位置，返回「找过哪些地方」。"""
 
         async def handler():
-            data = await self._proxy_shim("workbuddy", "/accounts/scan")
+            shim = self._account_shim()
+            data = await self._proxy_shim(shim, "/accounts/scan")
             cands = data.get("candidates") or []
             found = [c for c in cands if c.get("exists") and c.get("accountCount", 0) > 0]
             logger.info(
                 f"[shim_connector] 扫描 vault：{len(cands)} 个候选，"
                 f"{len(found)} 个有账号"
             )
-            return {"ok": True, **data}
+            return {"ok": True, "shim": shim, **data}
 
         try:
             return await self._api_response(await handler())
         except (ValueError, RuntimeError) as exc:
             return await self._api_response({"ok": False, "message": str(exc)}, 400)
+
+    def _account_shim(self, body: dict | None = None) -> str:
+        """账号池操作的目标 shim。默认 workbuddy。
+
+        优先从 query 的 ?shim= 取；没有则看请求体 body["shim"]
+        （POST 接口前端把 shim 放在 body 里）。
+        """
+        name = ""
+        if _quart_request is not None:
+            try:
+                name = str(_quart_request.args.get("shim") or "").strip()
+            except Exception:  # noqa: BLE001
+                pass
+        if name == "" and isinstance(body, dict):
+            name = str(body.get("shim") or "").strip()
+        if name == "":
+            name = "workbuddy"
+        if name not in ("workbuddy", "trae", "qoder"):
+            raise ValueError("shim 只能是 workbuddy / trae / qoder")
+        return name
+
+    def _account_region(self, shim: str, region: str) -> str:
+        """region 归一化，各 shim 的叫法不同。
+
+        workbuddy: cn | global
+        trae:      只有 cn
+        qoder:     qoder-cn | qoder
+        """
+        if shim == "trae":
+            return "cn"
+        if shim == "qoder":
+            if region in ("qoder-cn", "qoder"):
+                return region
+            # 允许前端沿用 cn/global 叫法
+            return "qoder" if region == "global" else "qoder-cn"
+        if region not in ("cn", "global"):
+            raise ValueError("region 只能是 cn 或 global")
+        return region
+
 
     async def _api_accounts(self):
         """列出某区所有账号。?region=cn|global"""
@@ -2494,10 +2717,17 @@ class ShimConnector(Star):
                     region = str(_quart_request.args.get("region") or "cn").strip()
                 except Exception:  # noqa: BLE001
                     pass
-            if region not in ("cn", "global"):
-                raise ValueError("region 只能是 cn 或 global")
-            data = await self._proxy_shim("workbuddy", f"/accounts?region={region}")
-            return {"ok": True, "region": region, **data}
+            shim = self._account_shim()
+            region = self._account_region(shim, region)
+            force = ""
+            if _quart_request is not None:
+                try:
+                    if str(_quart_request.args.get("refresh") or "") in ("1", "true", "yes"):
+                        force = "&refresh=1"
+                except Exception:  # noqa: BLE001
+                    pass
+            data = await self._proxy_shim(shim, f"/accounts?region={region}{force}")
+            return {"ok": True, "shim": shim, "region": region, **data}
 
         try:
             return await self._api_response(await handler())
@@ -2508,7 +2738,8 @@ class ShimConnector(Star):
         """当前正在用的账号 + 冷却状态。"""
 
         async def handler():
-            data = await self._proxy_shim("workbuddy", "/accounts/current")
+            shim = self._account_shim()
+            data = await self._proxy_shim(shim, "/accounts/current")
             return {"ok": True, **data}
 
         try:
@@ -2530,9 +2761,10 @@ class ShimConnector(Star):
                 payload["path"] = manual_path
                 logger.info(f"[shim_connector] 从指定路径导入: {manual_path}")
 
-            data = await self._proxy_shim_post(
-                "workbuddy", "/accounts/import", payload
-            )
+            shim = self._account_shim(body)
+            payload["region"] = self._account_region(
+                shim, str(body.get("region") or "cn"))
+            data = await self._proxy_shim_post(shim, "/accounts/import", payload)
             total = data.get("total") or {}
             logger.info(
                 f"[shim_connector] 导入账号：新增 {total.get('imported', 0)}，"
@@ -2553,9 +2785,10 @@ class ShimConnector(Star):
             account_id = str(body.get("accountId") or "").strip()
             if not account_id:
                 raise ValueError("缺少 accountId")
-            region = str(body.get("region") or "cn")
+            shim = self._account_shim(body)
+            region = self._account_region(shim, str(body.get("region") or "cn"))
             data = await self._proxy_shim_post(
-                "workbuddy",
+                shim,
                 "/accounts/switch",
                 {"accountId": account_id, "region": region},
             )
@@ -2575,9 +2808,10 @@ class ShimConnector(Star):
             account_id = str(body.get("accountId") or "").strip()
             if not account_id:
                 raise ValueError("缺少 accountId")
-            region = str(body.get("region") or "cn")
+            shim = self._account_shim(body)
+            region = self._account_region(shim, str(body.get("region") or "cn"))
             data = await self._proxy_shim_post(
-                "workbuddy",
+                shim,
                 "/accounts/delete",
                 {"accountId": account_id, "region": region},
             )
@@ -2603,7 +2837,8 @@ class ShimConnector(Star):
             }
             if body.get("model"):
                 payload["model"] = str(body["model"])
-            data = await self._proxy_shim_post("workbuddy", "/accounts/test", payload)
+            shim = self._account_shim(body)
+            data = await self._proxy_shim_post(shim, "/accounts/test", payload)
             logger.info(
                 f"[shim_connector] 测试账号 {account_id[:12]}: "
                 f"{'通过' if data.get('ok') else '失败'} ({data.get('message', '')})"

@@ -39,6 +39,7 @@ const state = {
   rotDetail: null,
   costShim: "workbuddy",
   accounts: { cn: [], global: [] },
+  accountShim: "workbuddy",   // workbuddy | trae
   activeRegion: "cn",
   models: [],
   selected: new Set(),
@@ -267,21 +268,93 @@ function bindSearch(key, rerender) {
   });
 }
 
+/**
+ * 通用「等 shim 启动」包装。
+ *
+ * 只对「未在运行 / 端口空闲」重试，最多 20 秒；
+ * 其他错误立即抛出，避免把真故障也吞掉。
+ */
+/**
+ * 等目标 shim 起来再继续。
+ *
+ * 2026-11-13：AstrBot 重载插件时 initialize() 串行启动 5 个 shim，
+ * llm_pool 永远最后一个（约 7 秒）。这期间 /status 返回 200 但 running=false，
+ * 不能只看 HTTP 状态，要看 shims[].running。
+ *
+ * 最多等 20 秒，期间界面显示倒计时。超时后不再等，让后续逻辑正常报错。
+ */
+async function withStartupRetry(targetName, onWaiting) {
+  const MAX_WAIT_MS = 20000;
+  const RETRY_MS = 1500;
+  const startedAt = Date.now();
+
+  while (true) {
+    let allUp = true;
+    try {
+      const s = await apiGet("status");
+      const shims = s.shims || [];
+      const t = shims.find(x => x.name === targetName);
+      if (t && !t.running) allUp = false;
+      // 没有目标信息时，只要有任何 shim 没起来就先等
+      if (!t && shims.some(x => x.enabled && !x.running)) allUp = false;
+    } catch (e) { allUp = false; }
+
+    if (allUp) {
+      if (Date.now() - startedAt > 0) {
+        notice(targetName + " 已启动，数据加载完成", "ok", 2500);
+      }
+      return;
+    }
+
+    const elapsed = Date.now() - startedAt;
+    if (elapsed + RETRY_MS > MAX_WAIT_MS) return;   // 超时，交给正常报错
+    if (onWaiting) onWaiting(Math.round(elapsed / 1000));
+    await new Promise(res => setTimeout(res, RETRY_MS));
+  }
+}
+
 /* ---------- 账号池 ---------- */
 
-async function loadAccounts() {
+async function loadAccounts(force = false) {
   const list = q("#accountList");
-  try {
-    const [cn, global] = await Promise.all([
-      apiGet("accounts", { region: "cn" }).catch(() => ({ accounts: [] })),
-      apiGet("accounts", { region: "global" }).catch(() => ({ accounts: [] })),
-    ]);
-    state.accounts.cn = cn.accounts || [];
-    state.accounts.global = global.accounts || [];
+  const shim = state.accountShim || "workbuddy";
 
-    // 拉耗费数据（用于显示每个账号用了多少）
+  // 预热：等目标 shim 起来
+  try {
+    await withStartupRetry(
+      shim,
+      (sec) => { if (list) list.innerHTML = '<div class="empty">shim 正在启动，等待中…（' + sec + ' 秒）</div>'; }
+    );
+  } catch (e) { /* 真故障交给下面的正常报错 */ }
+
+  try {
+    const refresh = force ? "1" : "0";
+
+    if (shim === "trae") {
+      // Trae 只有 cn 单区
+      const r = await apiGet("accounts", { shim, region: "cn", refresh }).catch(() => ({ accounts: [] }));
+      state.accounts.cn = r.accounts || [];
+      state.accounts.global = [];
+    } else if (shim === "qoder") {
+      // Qoder 两区：qoder-cn / qoder
+      const [cn, intl] = await Promise.all([
+        apiGet("accounts", { shim, region: "qoder-cn", refresh }).catch(() => ({ accounts: [] })),
+        apiGet("accounts", { shim, region: "qoder", refresh }).catch(() => ({ accounts: [] })),
+      ]);
+      state.accounts.cn = cn.accounts || [];
+      state.accounts.global = intl.accounts || [];
+    } else {
+      const [cn, global] = await Promise.all([
+        apiGet("accounts", { shim, region: "cn", refresh }).catch(() => ({ accounts: [] })),
+        apiGet("accounts", { shim, region: "global", refresh }).catch(() => ({ accounts: [] })),
+      ]);
+      state.accounts.cn = cn.accounts || [];
+      state.accounts.global = global.accounts || [];
+    }
+
+    // 耗费（只有 workbuddy 有 per-account 统计）
     try {
-      const cost = await apiGet("cost", { name: "workbuddy" });
+      const cost = await apiGet("cost", { name: shim });
       state.costByAccount = {};
       for (const x of (cost.byAccount || [])) {
         state.costByAccount[x.accountId] = x;
@@ -291,9 +364,8 @@ async function loadAccounts() {
 
     renderAccounts();
 
-    // 当前账号
     try {
-      const cur = await apiGet("accounts/current");
+      const cur = await apiGet("accounts/current", { shim });
       state.current = cur;
       renderAccounts();
     } catch (e) { /* 忽略 */ }
@@ -315,13 +387,23 @@ function renderAccounts() {
   });
 
   if (all.length === 0) {
-    list.innerHTML = '<div class="empty">'
-      + (region === "global" ? "国际版还没有账号。" : "国内版还没有账号。")
-      + '<br>点右上角「检测本地账号」或「扫码添加」。</div>';
+    if (state.accountShim === "trae") {
+      list.innerHTML = '<div class="empty">'
+        + 'Trae 账号池还是空的。'
+        + '<br>点右上角「检测本地账号」，会自动扫 dsh-home 的 .trae-auth.cn.json。</div>';
+    } else {
+      list.innerHTML = '<div class="empty">'
+        + (region === "global" ? "国际版还没有账号。" : "国内版还没有账号。")
+        + '<br>点右上角「检测本地账号」或「扫码添加」。</div>';
+    }
     return;
   }
 
   const curId = state.current?.current?.accountId || "";
+  // Qoder 的区叫 qoder-cn / qoder，页面上仍用 cn / global 两栏
+  const regionParam = state.accountShim === "qoder"
+    ? (region === "global" ? "qoder" : "qoder-cn")
+    : region;
   const cooling = new Map((state.current?.cooling || []).map(c => [c.accountId, c]));
 
   list.innerHTML = all.map(a => {
@@ -339,14 +421,20 @@ function renderAccounts() {
     else if (isCur) statusBadge = '<span class="badge ok">当前使用</span>';
     else statusBadge = '<span class="badge info">可用</span>';
 
-    // 积分显示
-    const credit = a.credit;
+    // 右侧数字：WorkBuddy 显示积分，Trae 显示剩余有效期
     let creditHtml;
-    if (credit === null || credit === undefined) {
-      creditHtml = `<div class="num ok">—</div>`;
+    if (state.accountShim === "trae") {
+      const days = a.remainingMs != null ? Math.round(a.remainingMs / 86400000) : null;
+      const level = days == null ? "ok" : (days < 3 ? "zero" : (days < 10 ? "low" : "ok"));
+      creditHtml = `<div class="num ${level}">${days == null ? "—" : days + "天"}</div>`;
     } else {
-      const level = credit === 0 ? "zero" : (credit < 100 ? "low" : "ok");
-      creditHtml = `<div class="num ${level}">${credit.toLocaleString("zh-CN")}</div>`;
+      const credit = a.credit;
+      if (credit === null || credit === undefined) {
+        creditHtml = `<div class="num ok">—</div>`;
+      } else {
+        const level = credit === 0 ? "zero" : (credit < 100 ? "low" : "ok");
+        creditHtml = `<div class="num ${level}">${credit.toLocaleString("zh-CN")}</div>`;
+      }
     }
 
     // 本会话已用
@@ -370,9 +458,9 @@ function renderAccounts() {
         </div>
         <div class="account-credit">${creditHtml}</div>
         <div class="account-actions">
-          ${isCur ? "" : `<button class="btn" data-switch="${a.accountId}" data-region="${a.region}">切换</button>`}
-          <button class="btn" data-test="${a.accountId}" data-region="${a.region}">测试</button>
-          <button class="btn danger" data-del="${a.accountId}" data-region="${a.region}">删除</button>
+          ${isCur ? "" : `<button class="btn" data-switch="${a.accountId}" data-region="${regionParam}">切换</button>`}
+          <button class="btn" data-test="${a.accountId}" data-region="${regionParam}">测试</button>
+          <button class="btn danger" data-del="${a.accountId}" data-region="${regionParam}">删除</button>
         </div>
       </div>
     `;
@@ -383,6 +471,7 @@ function renderAccounts() {
     btn.onclick = async () => {
       try {
         await apiPost("accounts/switch", {
+          shim: state.accountShim,
           accountId: btn.dataset.switch,
           region: btn.dataset.region,
         });
@@ -399,6 +488,7 @@ function renderAccounts() {
       if (!confirm("确定删除这个账号？")) return;
       try {
         await apiPost("accounts/delete", {
+          shim: state.accountShim,
           accountId: btn.dataset.del,
           region: btn.dataset.region,
         });
@@ -417,7 +507,9 @@ async function testAccount(accountId, region, btn) {
   btn.textContent = "测试中…";
 
   try {
-    const r = await apiPost("accounts/test", { accountId, region });
+    const r = await apiPost("accounts/test", {
+      shim: state.accountShim, accountId, region,
+    });
     if (r.ok) {
       const parts = [];
       if (r.latencyMs) parts.push(r.latencyMs + "ms");
@@ -446,7 +538,7 @@ async function openScanModal() {
   q("#manualPath").value = "";
 
   try {
-    const r = await apiGet("accounts/scan");
+    const r = await apiGet("accounts/scan", { shim: state.accountShim });
     const candidates = r.candidates || [];
     renderScanList(candidates);
   } catch (e) {
@@ -525,7 +617,7 @@ async function doImport(vaultPath, btn) {
   const old = btn ? btn.textContent : "";
   if (btn) { btn.disabled = true; btn.textContent = "导入中…"; }
   try {
-    const body = {};
+    const body = { shim: state.accountShim };
     if (vaultPath) body.path = vaultPath;
     const r = await apiPost("accounts/import", body);
     const t = r.total || {};
@@ -533,7 +625,7 @@ async function doImport(vaultPath, btn) {
     await loadAccounts();
     // 重新扫描以更新状态
     if (!q("#scanModal").hidden) {
-      const s = await apiGet("accounts/scan");
+      const s = await apiGet("accounts/scan", { shim: state.accountShim });
       renderScanList(s.candidates || []);
     }
   } catch (e) {
@@ -618,6 +710,14 @@ function closeLogin() {
 async function loadModels() {
   const list = q("#modelList");
   list.innerHTML = '<div class="empty">加载中…</div>';
+  // 预热：等所有 shim 起来再拉数据（AstrBot 重载时 llm_pool 最后启动）
+  try {
+    await withStartupRetry(
+      state.shim,
+      (sec) => { if (list) list.innerHTML = '<div class="empty">shim 正在启动，等待中…（' + sec + ' 秒）</div>'; }
+    );
+  } catch (e) { /* 真故障交给下面的正常报错 */ }
+
   try {
     const r = await apiGet("catalog", { name: state.shim });
     const entry = (r.catalog || {})[state.shim];
@@ -726,6 +826,14 @@ async function saveModels() {
 async function loadCost() {
   const list = q("#costList");
   list.innerHTML = '<div class="empty">加载中…</div>';
+  // 预热：等所有 shim 起来再拉数据（AstrBot 重载时 llm_pool 最后启动）
+  try {
+    await withStartupRetry(
+      state.costShim,
+      (sec) => { if (list) list.innerHTML = '<div class="empty">shim 正在启动，等待中…（' + sec + ' 秒）</div>'; }
+    );
+  } catch (e) { /* 真故障交给下面的正常报错 */ }
+
   try {
     const r = await apiGet("cost", { name: state.costShim });
     state.costCache = r;      // 缓存供搜索重渲染
@@ -808,33 +916,102 @@ async function resetCost() {
 }
 
 
+/** 强制刷新积分（绕过 shim 5 分钟缓存）。 */
+async function refreshBalance() {
+  const btn = q("#refreshBalance");
+  const old = btn ? btn.textContent : "";
+  if (btn) { btn.disabled = true; btn.textContent = "刷新中…"; }
+  try {
+    await loadAccounts(true);
+    notice("积分已刷新", "ok", 2500);
+  } catch (e) {
+    notice("刷新失败：" + e.message, "err");
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = old; }
+  }
+}
+
 /* ---------- 轮换层 ---------- */
 
+/**
+ * 加载轮换层数据。
+ *
+ * 2026-11-13 修正：AstrBot 重载插件时 initialize() 是串行启动 5 个 shim，
+ * llm_pool 永远最后一个（约 7 秒后）。这期间点开「轮换层」会报
+ * 「llm_pool 未在运行（端口 8792 空闲）」，其实是正在启动，不是故障。
+ *
+ * 现在：遇到「未在运行 / 端口空闲」不立刻报错，每 1.5 秒重试一次，
+ * 最多等 20 秒，界面显示倒计时。其他错误照常报。
+ */
 async function loadRotation() {
   const list = q("#rotList");
-  list.innerHTML = '<div class="empty">加载中…</div>';
-  q("#rotStatus").textContent = "";
+  const status = q("#rotStatus");
+  const MAX_WAIT_MS = 20000;
+  const RETRY_MS = 1500;
+  const startedAt = Date.now();
+  let lastErr = "";
 
-  try {
-    const r = await apiGet("rotation-targets", { name: state.rotShim });
+  while (true) {
+    const elapsed = Date.now() - startedAt;
+    const isRetry = elapsed > 0;
 
-    state.rotCurrent = (r.current || []).map(x => x.id);
-    state.rotAvailable = r.available || [];
-    state.rotStrategy = r.strategy || "priority";
+    list.innerHTML = isRetry
+      ? '<div class="empty">该 shim 正在启动，等待中…（已等 ' +
+        Math.round(elapsed / 1000) + ' 秒，最多 20 秒）</div>'
+      : '<div class="empty">加载中…</div>';
+    status.textContent = "";
 
-    // 当前顺序的详细信息（分数、成功失败数）
-    const detail = new Map((r.current || []).map(x => [x.id, x]));
+    try {
+      const r = await apiGet("rotation-targets", { name: state.rotShim });
 
-    // 状态行
-    const usingDefault = r.usingDefault === true;
-    q("#rotStatus").innerHTML = usingDefault
-      ? '<span style="color:var(--warn)">当前用内置默认列表（配置里 priority 为空）</span>'
-      : `<span style="color:var(--ok)">当前用自定义列表</span>`;
+      state.rotCurrent = (r.current || []).map(x => x.id);
+      state.rotAvailable = r.available || [];
+      state.rotStrategy = r.strategy || "priority";
 
-    state.rotDetail = detail;
-    renderRotation(detail);
-  } catch (e) {
-    list.innerHTML = '<div class="empty">加载失败：' + e.message + '</div>';
+      const detail = new Map((r.current || []).map(x => [x.id, x]));
+
+      // 状态行：两个轮换层各用各的顺序
+      const usingDefault = r.usingDefault === true;
+      const fromMain = r.orderSource === "main_chain";
+      const isVision = r.orderSource === "vision";
+      if (fromMain) {
+        status.innerHTML =
+          '<span style="color:var(--ok)">llm_pool 顺序来自主链 fallback_provider_ids</span>' +
+          '<span style="color:var(--dim);font-size:12px;margin-left:8px">' +
+          '保存会同时更新主链与插件配置</span>';
+      } else if (isVision) {
+        status.innerHTML =
+          '<span style="color:var(--ok)">vision 用独立的图片理解顺序</span>' +
+          '<span style="color:var(--dim);font-size:12px;margin-left:8px">' +
+          '不跟随主链，保存不影响文本 fallback</span>';
+      } else if (usingDefault) {
+        status.innerHTML = '<span style="color:var(--warn)">当前用内置默认列表（配置里 priority 为空）</span>';
+      } else {
+        status.innerHTML = '<span style="color:var(--ok)">当前用插件自定义列表</span>';
+      }
+      // 主链里有、但 shim 没加载的条目数
+      state.rotMissing = (r.current || []).filter(x => x.missing).length;
+
+      if (isRetry) {
+        notice(`${state.rotShim} 已启动，数据加载完成`, "ok", 2500);
+      }
+
+      state.rotDetail = detail;
+      renderRotation(detail);
+      return;
+
+    } catch (e) {
+      lastErr = String(e.message || e);
+
+      // 只有「没在运行 / 端口空闲」才重试；别的错误直接报出来
+      const starting = /未在运行|端口.*空闲|not.*running|port.*free/i.test(lastErr);
+      if (!starting || elapsed + RETRY_MS > MAX_WAIT_MS) {
+        list.innerHTML = '<div class="empty">加载失败：' + lastErr + '</div>';
+        return;
+      }
+
+      await new Promise(res => setTimeout(res, RETRY_MS));
+    }
   }
 }
 
@@ -876,6 +1053,7 @@ function renderRotation(detail) {
     const badges = [];
     if (d && d.cooling) badges.push('<span class="badge warn">冷却</span>');
     if (d && d.degraded) badges.push('<span class="badge err">降级</span>');
+    if (d && d.missing) badges.push('<span class="badge info">shim 未加载</span>');
 
     return `
       <div class="rot-row">
@@ -970,7 +1148,13 @@ async function saveRotation() {
     });
 
     if (r.restarted) {
-      notice(`已保存并重启 ${state.rotShim}，新顺序立即生效`, "ok", 5000);
+      let extra = "";
+      if (state.rotShim === "llm_pool") {
+        extra = r.mainSynced ? "，并已同步主链顺序" : "（主链同步失败）";
+      } else {
+        extra = "（视觉轮换独立顺序，不影响主链）";
+      }
+      notice(`已保存并重启 ${state.rotShim}${extra}`, "ok", 5000);
     } else {
       notice(`配置已保存，但重启失败：${r.restartError || "未知"}`, "warn", 8000);
     }
@@ -1009,14 +1193,30 @@ async function init() {
   }
 
   qa(".tab").forEach(t => { t.onclick = () => switchTab(t.dataset.tab); });
-  q("#refreshAll").onclick = () => switchTab(state.tab);
+  q("#refreshAll").onclick = () => {
+    if (state.tab === "accounts") loadAccounts(true);
+    else switchTab(state.tab);
+  };
   qa(".region-tab").forEach(t => {
     t.onclick = () => {
       state.activeRegion = t.dataset.region;
       renderAccounts();
     };
   });
+  qa("[data-acc-shim]").forEach(btn => {
+    btn.onclick = async () => {
+      state.accountShim = btn.dataset.accShim;
+      qa("[data-acc-shim]").forEach(x => x.classList.toggle("active", x === btn));
+      // Trae 只有 cn，隐藏国际区标签
+      const tabs = q("#regionTabs");
+      if (tabs) tabs.style.display = state.accountShim === "trae" ? "none" : "";
+      if (state.accountShim === "trae") state.activeRegion = "cn";
+      await loadAccounts();
+    };
+  });
+
   q("#scanVaults").onclick = openScanModal;
+  q("#refreshBalance").onclick = refreshBalance;
   q("#closeScan").onclick = () => { q("#scanModal").hidden = true; };
   q("#importManual").onclick = importManualPath;
   q("#addAccount").onclick = startLogin;

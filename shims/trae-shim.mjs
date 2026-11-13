@@ -17,7 +17,7 @@
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { createDecipheriv, createHash, randomUUID } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, readdirSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
@@ -134,6 +134,168 @@ function loadCredentialFromDesktop() {
     "\n\n请确认：\n  1. Trae 桌面端已安装并登录\n" +
     "  2. 或用 TRAE_AUTH_FILE 指定凭据 JSON"
   );
+}
+
+// ── Trae 账号池 ─────────────────────────────────────────────
+//
+// 参考 dsh-connect-trae 的 .trae-auth.<region>.json 格式：
+//   { version, credentials: { <key>: { accessToken, refreshToken, userId,
+//     accountName, host, userRegion, expiresAtMs, edition, source } } }
+//
+// 插件自己维护一份 vault（不碰 dsh 的文件），格式与 workbuddy 的 vault 对齐：
+//   .trae-vault/cn/<accountId>.json
+//
+// 2026-11-13：trae-shim 原来只用 credentials 里的**第一个**账号，
+// 现在支持多个、页面可勾选排序、额度用尽自动换号。
+
+const TRAE_VAULT = process.env.TRAE_VAULT_DIR ||
+  join(fileURLToPath(new URL(".", import.meta.url)), ".trae-vault");
+
+/** Trae 账号 id：sha256(edition + userId) 前 24 位（对齐 dsh-connect-trae）。 */
+function traeAccountId(rec) {
+  const stable = String(rec.edition || "cn") + "\0" + String(rec.userId || rec.accountName || "unknown");
+  return createHash("sha256").update(stable).digest("hex").slice(0, 24);
+}
+
+function traeVaultDir(region = "cn") {
+  return join(TRAE_VAULT, region);
+}
+
+function ensureTraeVault(region = "cn") {
+  const d = traeVaultDir(region);
+  try { mkdirSync(d, { recursive: true, mode: 0o700 }); } catch { /* 已存在 */ }
+  return d;
+}
+
+function traeVaultFiles(region = "cn") {
+  const d = traeVaultDir(region);
+  let entries = [];
+  try { entries = readdirSync(d); } catch { return []; }
+  return entries
+    .filter((n) => /\.json$/.test(n))
+    .map((n) => ({ accountId: n.replace(/\.json$/, ""), path: join(d, n) }));
+}
+
+function readTraeVault(path) {
+  try {
+    const doc = JSON.parse(readFileSync(path, "utf8").replace(/^\uFEFF/, ""));
+    if (doc && typeof doc.accessToken === "string" && doc.accessToken !== "") return doc;
+  } catch { /* 坏文件 */ }
+  return null;
+}
+
+/** 把一条 dsh 格式凭据写进 vault。 */
+function writeTraeVault(region, rec) {
+  const d = ensureTraeVault(region);
+  const accountId = traeAccountId(rec);
+  const target = join(d, accountId + ".json");
+  const tmp = target + ".tmp." + process.pid;
+  const doc = {
+    version: 1,
+    accountId,
+    refreshedAtMs: Date.now(),
+    accessToken: rec.accessToken || rec.token || "",
+    refreshToken: rec.refreshToken || "",
+    userId: rec.userId || "",
+    accountName: rec.accountName || rec.account?.username || "",
+    host: rec.host || "https://api.trae.cn",
+    userRegion: rec.userRegion || "CN",
+    edition: rec.edition || "cn",
+    expiresAtMs: Number(rec.expiresAtMs || rec.expiredAt || rec.expiresAt || 0),
+    refreshExpiresAtMs: Number(rec.refreshExpiresAtMs || 0),
+    source: rec.source || "dsh",
+  };
+  if (doc.accessToken === "") return null;
+  writeFileSync(tmp, JSON.stringify(doc, null, 2), { encoding: "utf8", mode: 0o600 });
+  renameSync(tmp, target);
+  return accountId;
+}
+
+/** 列出 vault 里的账号（脱敏，供页面）。 */
+function listTraeAccounts(region = "cn") {
+  return traeVaultFiles(region).map((f) => {
+    const a = readTraeVault(f.path);
+    if (!a) return { accountId: f.accountId, valid: false, region };
+    const exp = Number(a.expiresAtMs || 0);
+    return {
+      accountId: a.accountId,
+      region,
+      valid: true,
+      nickname: a.accountName || "(无昵称)",
+      userId: a.userId || "",
+      edition: a.edition || "cn",
+      expiresAtMs: exp,
+      expired: exp > 0 && exp < Date.now(),
+      remainingMs: exp > 0 ? Math.max(0, exp - Date.now()) : null,
+      source: a.source || "dsh",
+    };
+  });
+}
+
+/** 当前选中/粘性账号。 */
+let stickyTraeAccountId = null;
+const traeCooldown = new Map();   // accountId → 冷却到什么时候
+
+/** 选一个可用账号。 */
+function pickTraeAccount(region = "cn") {
+  const files = traeVaultFiles(region);
+  if (files.length === 0) return null;
+  const now = Date.now();
+  const candidates = [];
+  for (const f of files) {
+    const a = readTraeVault(f.path);
+    if (!a) continue;
+    const exp = Number(a.expiresAtMs || 0);
+    if (exp > 0 && exp - now < 300000) continue;      // 快过期
+    if ((traeCooldown.get(a.accountId) || 0) > now) continue;
+    candidates.push(a);
+  }
+  if (candidates.length === 0) {
+    if (traeCooldown.size > 0) {
+      traeCooldown.clear();
+      return pickTraeAccount(region);
+    }
+    return null;
+  }
+  if (stickyTraeAccountId) {
+    const hit = candidates.find((a) => a.accountId === stickyTraeAccountId);
+    if (hit) return hit;
+  }
+  stickyTraeAccountId = candidates[0].accountId;
+  return candidates[0];
+}
+
+/** 额度用尽 → 冷却 30 分钟。 */
+function coolDownTrae(accountId, minutes = 30) {
+  if (!accountId) return;
+  traeCooldown.set(accountId, Date.now() + minutes * 60000);
+  if (stickyTraeAccountId === accountId) stickyTraeAccountId = null;
+  console.error("[TRAE-shim] 账号 " + accountId.slice(0, 12) + " 冷却 " + minutes + " 分钟");
+}
+
+/** 从 dsh-home 的 .trae-auth.<region>.json 导入多个账号。 */
+function importTraeFromDsh(region = "cn") {
+  const dshHome = process.env.DSH_HOME ||
+    join(homedir(), ".dsh");
+  const candidates = [
+    join(dshHome, `.trae-auth.${region}.json`),
+    join("D:", "dev", "dsh-home", `.trae-auth.${region}.json`),
+  ];
+  const seen = new Set();
+  for (const p of candidates) {
+    if (!existsSync(p)) continue;
+    let doc;
+    try { doc = JSON.parse(readFileSync(p, "utf8")); } catch { continue; }
+    const list = doc.credentials || {};
+    for (const rec of (Array.isArray(list) ? list : Object.values(list))) {
+      if (!rec || typeof rec !== "object") continue;
+      const id = traeAccountId(rec);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      writeTraeVault(region, rec);
+    }
+  }
+  return seen.size;
 }
 
 // ── 耗费统计 ────────────────────────────────────────────────
@@ -484,6 +646,15 @@ function persistCredential(cred) {
     return;
   }
   try {
+    // 刷新的是 vault 里的账号 → 写回对应文件
+    if (cred.accountId) {
+      const p = join(traeVaultDir("cn"), cred.accountId + ".json");
+      if (existsSync(p)) {
+        writeFileSync(p, JSON.stringify({ ...cred, refreshedAtMs: Date.now() }, null, 2), "utf8");
+        console.error("[TRAE-shim] 已把新 token 写回 vault: " + cred.accountId.slice(0, 12));
+        return;
+      }
+    }
     const doc = JSON.parse(readFileSync(target, "utf8"));
     const list = doc.credentials ?? {};
     const key = Object.keys(list)[0];
@@ -531,7 +702,13 @@ async function resolveCredential() {
  * 这样第三方用户只要装了 Trae 并登录，**不配任何东西就能用**。
  */
 function loadCredential() {
-  // 1) 显式指定的文件优先
+  // 1) 账号池 vault 优先（多账号，页面可管理）
+  const vaultCred = pickTraeAccount("cn");
+  if (vaultCred) {
+    return { ...vaultCred, source: "vault" };
+  }
+
+  // 2) 显式指定的文件（兼容旧配置）
   const explicit = process.env.TRAE_AUTH_FILE;
   if (explicit && existsSync(explicit)) {
     const doc = JSON.parse(readFileSync(explicit, "utf8"));
@@ -543,7 +720,7 @@ function loadCredential() {
     throw new Error("Trae 凭据为空或格式不符: " + explicit);
   }
 
-  // 2) 自动从桌面端解出
+  // 3) 自动从桌面端解出
   return loadCredentialFromDesktop();
 }
 
@@ -857,22 +1034,62 @@ async function handleChat(req, res) {
   const controller = new AbortController();
   res.on("close", () => controller.abort());
 
-  let upstream;
-  try {
-    upstream = await fetch(CHAT_BASE + CHAT_PATH, {
-      method: "POST",
-      headers: buildHeaders(cred),
-      body,
-      signal: AbortSignal.any([controller.signal, AbortSignal.timeout(180000)]),
-    });
-  } catch (error) {
-    sendError(res, 502, "transport error: " + String(error), "server");
+  // 账号池：额度用尽 / 鉴权失败时自动换下一个账号重试
+  // 参照 workbuddy-shim 的 pickVaultAccount + accountCooldown 逻辑。
+  const MAX_ACCOUNT_TRIES = Number(process.env.TRAE_ACCOUNT_RETRY ?? "3");
+  let upstream = null;
+  let lastError = "";
+  let usedCred = cred;
+
+  for (let attempt = 0; attempt < MAX_ACCOUNT_TRIES; attempt++) {
+    if (attempt > 0) {
+      const next = pickTraeAccount("cn");
+      if (!next) {
+        console.error("[TRAE-shim] 没有更多可用账号，放弃重试");
+        break;
+      }
+      usedCred = next;
+      console.error("[TRAE-shim] 换账号重试：" + String(next.accountName || next.accountId || "").slice(0, 20));
+    }
+
+    try {
+      upstream = await fetch(CHAT_BASE + CHAT_PATH, {
+        method: "POST",
+        headers: buildHeaders(usedCred),
+        body,
+        signal: AbortSignal.any([controller.signal, AbortSignal.timeout(180000)]),
+      });
+    } catch (error) {
+      lastError = "transport error: " + String(error);
+      continue;
+    }
+
+    if (upstream.ok) break;
+
+    const text = (await upstream.text()).slice(0, 800);
+    lastError = text || ("upstream " + upstream.status);
+
+    // 只对「额度/鉴权」类错误换号，其它错误直接报
+    const quotaLike = upstream.status === 401 || upstream.status === 403 ||
+      /quota|limit|exceed|insufficient|balance|credit|14018|too many/i.test(text);
+    if (!quotaLike) {
+      sendError(res, upstream.status === 401 ? 401 : 502, lastError, "upstream");
+      return;
+    }
+
+    if (usedCred.accountId) coolDownTrae(usedCred.accountId, 30);
+    console.error("[TRAE-shim] 账号 " + String(usedCred.accountId || "?").slice(0, 12) +
+      " 触发额度/鉴权限制，准备换号");
+    upstream = null;
+  }
+
+  if (upstream === null) {
+    sendError(res, 502, lastError || "所有账号均不可用", "upstream");
     return;
   }
 
   if (!upstream.ok) {
-    const text = (await upstream.text()).slice(0, 800);
-    sendError(res, upstream.status === 401 ? 401 : 502, text || "upstream " + upstream.status, "upstream");
+    sendError(res, 502, lastError || "upstream error", "upstream");
     return;
   }
 
@@ -934,6 +1151,198 @@ async function handleChat(req, res) {
 
 const server = createServer((req, res) => {
   const url = req.url ?? "/";
+  // ── Trae 账号池接口 ───────────────────────────────────────
+  if (req.method === "GET" && (url === "/accounts" || url.startsWith("/accounts?"))) {
+    const region = /[?&]region=(cn|sg)\b/.exec(url)?.[1] || "cn";
+    sendJson(res, 200, {
+      ok: true,
+      region,
+      vaultDir: traeVaultDir(region),
+      current: stickyTraeAccountId,
+      accounts: listTraeAccounts(region),
+    });
+    return;
+  }
+
+  if (req.method === "GET" && (url === "/accounts/current" || url.startsWith("/accounts/current?"))) {
+    (async () => {
+      const cred = await resolveCredential().catch(() => null);
+      const now = Date.now();
+      const cooling = [];
+      for (const [id, until] of traeCooldown.entries()) {
+        if (until > now) cooling.push({ accountId: id, remainMin: Math.round((until - now) / 60000) });
+      }
+      sendJson(res, 200, {
+        ok: true,
+        current: cred ? {
+          accountId: cred.accountId || "(desktop/file)",
+          nickname: cred.accountName || "",
+          userId: cred.userId || "",
+          source: cred.source || "file",
+          expiresAtMs: cred.expiresAtMs || 0,
+        } : null,
+        sticky: stickyTraeAccountId,
+        cooling,
+      });
+    })().catch((e) => { if (!res.headersSent) sendError(res, 500, String(e), "internal"); });
+    return;
+  }
+
+  // 扫描本机所有 Trae 凭据（dsh-home + 桌面端）
+  if (req.method === "GET" && (url === "/accounts/scan" || url.startsWith("/accounts/scan?"))) {
+    (async () => {
+      const found = [];
+      const seen = new Set();
+
+      // 1) dsh-home 的 .trae-auth.<region>.json
+      const dshHome = process.env.DSH_HOME || join(homedir(), ".dsh");
+      const dshPaths = [
+        join(dshHome, ".trae-auth.cn.json"),
+        join("D:", "dev", "dsh-home", ".trae-auth.cn.json"),
+      ];
+      for (const p of dshPaths) {
+        if (!existsSync(p)) continue;
+        let doc;
+        try { doc = JSON.parse(readFileSync(p, "utf8")); } catch { continue; }
+        const list = doc.credentials || {};
+        for (const rec of (Array.isArray(list) ? list : Object.values(list))) {
+          if (!rec || typeof rec !== "object") continue;
+          const id = traeAccountId(rec);
+          if (seen.has(id)) continue;
+          seen.add(id);
+          found.push({
+            accountId: id,
+            nickname: rec.accountName || rec.account?.username || "(无昵称)",
+            userId: rec.userId || "",
+            edition: rec.edition || "cn",
+            expiresAtMs: Number(rec.expiresAtMs || 0),
+            from: p,
+          });
+        }
+      }
+
+      // 2) 桌面端当前登录
+      try {
+        const desktop = loadCredentialFromDesktop();
+        if (desktop && desktop.accessToken) {
+          const id = traeAccountId(desktop);
+          if (!seen.has(id)) {
+            seen.add(id);
+            found.push({
+              accountId: id,
+              nickname: desktop.accountName || "(桌面端)",
+              userId: desktop.userId || "",
+              edition: desktop.edition || "cn",
+              expiresAtMs: Number(desktop.expiresAtMs || 0),
+              from: "desktop",
+            });
+          }
+        }
+      } catch { /* 没登录 */ }
+
+      const inVault = new Set(traeVaultFiles("cn").map((x) => x.accountId));
+      for (const x of found) x.inVault = inVault.has(x.accountId);
+
+      sendJson(res, 200, { ok: true, found, vaultCount: inVault.size });
+    })().catch((e) => { if (!res.headersSent) sendError(res, 500, String(e), "internal"); });
+    return;
+  }
+
+  if (req.method === "POST" && (url === "/accounts/import" || url.startsWith("/accounts/import?"))) {
+    (async () => {
+      let body = {};
+      try {
+        const raw = (await readBody(req)).toString("utf8");
+        if (raw.trim() !== "") body = JSON.parse(raw);
+      } catch { /* ignore */ }
+      const region = String(body.region || "cn");
+      const n = importTraeFromDsh(region);
+      console.error("[TRAE-shim] 从 dsh 导入 " + n + " 个账号");
+      sendJson(res, 200, { ok: true, imported: n, region, accounts: listTraeAccounts(region) });
+    })().catch((e) => { if (!res.headersSent) sendError(res, 500, String(e), "internal"); });
+    return;
+  }
+
+  if (req.method === "POST" && (url === "/accounts/switch" || url.startsWith("/accounts/switch?"))) {
+    (async () => {
+      let body = {};
+      try {
+        const raw = (await readBody(req)).toString("utf8");
+        if (raw.trim() !== "") body = JSON.parse(raw);
+      } catch { /* ignore */ }
+      const id = String(body.accountId || "");
+      const region = String(body.region || "cn");
+      const hit = traeVaultFiles(region).find((x) => x.accountId === id);
+      if (!hit) { sendError(res, 404, "账号不存在: " + id, "not_found"); return; }
+      stickyTraeAccountId = id;
+      traeCooldown.delete(id);
+      sendJson(res, 200, { ok: true, current: id, region });
+    })().catch((e) => { if (!res.headersSent) sendError(res, 500, String(e), "internal"); });
+    return;
+  }
+
+  if (req.method === "POST" && (url === "/accounts/delete" || url.startsWith("/accounts/delete?"))) {
+    (async () => {
+      let body = {};
+      try {
+        const raw = (await readBody(req)).toString("utf8");
+        if (raw.trim() !== "") body = JSON.parse(raw);
+      } catch { /* ignore */ }
+      const id = String(body.accountId || "");
+      const region = String(body.region || "cn");
+      const hit = traeVaultFiles(region).find((x) => x.accountId === id);
+      if (!hit) { sendError(res, 404, "账号不存在: " + id, "not_found"); return; }
+      try { unlinkSync(hit.path); } catch { /* ignore */ }
+      if (stickyTraeAccountId === id) stickyTraeAccountId = null;
+      sendJson(res, 200, { ok: true, deleted: id });
+    })().catch((e) => { if (!res.headersSent) sendError(res, 500, String(e), "internal"); });
+    return;
+  }
+
+  if (req.method === "POST" && (url === "/accounts/test" || url.startsWith("/accounts/test?"))) {
+    (async () => {
+      let body = {};
+      try {
+        const raw = (await readBody(req)).toString("utf8");
+        if (raw.trim() !== "") body = JSON.parse(raw);
+      } catch { /* ignore */ }
+      const id = String(body.accountId || "");
+      const region = String(body.region || "cn");
+      const hit = traeVaultFiles(region).find((x) => x.accountId === id);
+      if (!hit) { sendError(res, 404, "账号不存在: " + id, "not_found"); return; }
+      const cred = readTraeVault(hit.path);
+      if (!cred) { sendError(res, 400, "账号文件损坏", "bad_file"); return; }
+
+      // 用该账号发一个最小请求（复用 chat 的请求构造）
+      const started = Date.now();
+      let ok = false, message = "", latencyMs = null;
+      try {
+        const input = {
+          model: "Doubao-Seed-Code",
+          messages: [{ role: "user", content: "hi" }],
+          max_tokens: 16,
+        };
+        // 复用 chat 的同一个构造函数，别自己拼（之前写成不存在的 buildTraeBody）
+        const rawBody = JSON.stringify(toTraeBody(input));
+        const r = await fetch(CHAT_BASE + CHAT_PATH, {
+          method: "POST",
+          headers: buildHeaders(cred),
+          body: rawBody,
+          signal: AbortSignal.timeout(45000),
+        });
+        latencyMs = Date.now() - started;
+        const t = await r.text();
+        ok = r.ok && !/"code"\s*:/.test(t.slice(0, 200));
+        message = ok ? "正常" : (t.slice(0, 80) || "HTTP " + r.status);
+      } catch (e) {
+        latencyMs = Date.now() - started;
+        message = String(e).includes("timeout") ? "超时" : "网络错误";
+      }
+      sendJson(res, 200, { ok, accountId: id, region, latencyMs, message });
+    })().catch((e) => { if (!res.headersSent) sendError(res, 500, String(e), "internal"); });
+    return;
+  }
+
   // 耗费统计
   if (req.method === "GET" && (url === "/cost" || url.startsWith("/cost?"))) {
     sendJson(res, 200, buildCostResponse());

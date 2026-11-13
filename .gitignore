@@ -18,3 +18,12 @@ shims/.trae-cost.json
 shims/.qoder-cost.json
 shims/.vision-cost.json
 shims/.llm-pool-cost.json
+# vault 备份 / 任何 vault* 变体（含 token）
+shims/.vault*
+shims/**/.vault*
+# Trae 账号池（含 token，绝对不能进仓库）
+shims/.trae-vault*
+shims/**/.trae-vault*
+# Qoder 账号池（含 token）
+shims/.qoder-vault*
+shims/**/.qoder-vault*

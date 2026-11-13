@@ -1,6 +1,6 @@
 ---
 name: astrbot-shim-connector
-description: 白嫖机器人：把已付费的 WorkBuddy / Trae / Qoder 订阅变成 AstrBot 的模型源（36 个候选模型按需勾选，零 API 费用、零配置）。当用户要把本机客户端的模型接进机器人、问怎么不花 API 钱让机器人跑起来、装了这个插件、shim 起不来、provider 没注册、模型返回空、端口冲突、/shim 命令怎么用、凭据读不到，或需要判断问题出在插件层/shim 层/provider 层时使用。触发词：shim_connector、白嫖、本机模型接入、免费模型、零成本、WorkBuddy 接入、Trae 接入、Qoder 接入、provider 没注册、shim 起不来、模型返回空、8787、8788、8789、/shim 命令。
+description: 白嫖机器人：把已付费的 WorkBuddy / Trae / Qoder 订阅变成 AstrBot 的模型源（75 个候选模型按需勾选，零 API 费用、零配置），含多账号池、扫码登录、余额查询、轮换层可视化编辑。当用户要把本机客户端的模型接进机器人、问怎么不花 API 钱让机器人跑起来、装了这个插件、shim 起不来、provider 没注册、模型返回空、端口冲突、/shim 命令怎么用、凭据读不到、账号 401、轮换层顺序没变化、fallback_provider_ids、主链顺序、或需要判断问题出在插件层/shim 层/provider 层时使用。触发词：shim_connector、白嫖、本机模型接入、免费模型、零成本、WorkBuddy 接入、Trae 接入、Qoder 接入、provider 没注册、shim 起不来、模型返回空、8787、8788、8789、8791、8792、/shim 命令、轮换层、fallback_provider_ids、主链顺序、账号 401、vault。
 ---
 
 # 白嫖机器人 | AstrBot 本机模型接入插件
@@ -9,7 +9,7 @@ description: 白嫖机器人：把已付费的 WorkBuddy / Trae / Qoder 订阅�
 连同视觉轮换层和 LLM 池，通过 loopback shim 变成 AstrBot 可用的模型源。
 
 **仓库**：https://github.com/rawLeaf/astrbot_plugin_shim_connector
-**当前版本**：v1.6.5（2026-11-05）
+**当前版本**：v1.7.0（2026-11-13）
 
 ---
 
@@ -180,7 +180,8 @@ AstrBot → provider(<source_id>/<model>)
 
 | 客户端 | 从哪读 |
 |---|---|
-| WorkBuddy | `%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\workbuddy-desktop.info`，5.6.0+ 的加密字段靠启动 app 取 at-rest 密钥 |
+| WorkBuddy（桌面端） | `%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\workbuddy-desktop.info`（CN）/`workbuddy-desktop-ai.info`（INTL），5.6.0+ 的加密字段靠启动 app 取 at-rest 密钥 |
+| WorkBuddy（多账号 vault） | 扫码登录 / 从 `dsh-connect-workbuddy` 的 vault 导入 |
 | Trae | 环境变量 `TRAE_AUTH_FILE` 指向的 JSON |
 | Qoder | `auth.v1.dat`（OSCrypt + DPAPI）|
 
@@ -188,6 +189,70 @@ AstrBot → provider(<source_id>/<model>)
 
 > 安全性：shim 只把凭据发给**官方上游**（trae / 腾讯 / qoder），
 > 不含任何遥测，不会把 token 写到别处或打进日志。
+
+---
+
+## ⚠️ WorkBuddy 凭据的三个大坑（2026-11-10 实战）
+
+### 坑 1：桌面端只存「当前登录」的那一个账号
+
+`workbuddy-desktop.info` 的结构：
+
+```json
+{
+  "auth": { "accessToken": "..." },          // ← 只有当前账号的 token
+  "account": { "uid": "fe93119a-...", "uin": "..." },
+  "accounts": [ { "uid": "fe93119a-..." } ],  // ← 只有 1 条
+  "allAccounts": [ { "uid": "fe93119a-..." } ] // ← 只有 1 条
+}
+```
+
+**用户在客户端切换账号时，文件被新账号覆盖，旧账号的 token 直接消失。**
+
+所以「为什么不能从桌面端直接读出所有账号」——因为桌面端根本不留历史。
+想要多账号，只能：
+
+1. 每次某账号登录时立刻导入（趁 token 还在）
+2. 用扫码登录（走 OAuth 流程，不依赖桌面端）
+3. **从 `dsh-connect-workbuddy` 的 vault 导入**（那个会累积历史）
+
+### 坑 2：vault 里可能有同一个账号的两份，其中一份是坏的
+
+`138****6954` 出现在三个地方，只有一份能用：
+
+| 位置 | 有效期 | issuer | 实测 |
+|---|---|---|---|
+| `D:\dev\dsh-home\workbuddy-vault\cn` | **12-10** | `www.codebuddy.cn` | ✅ **能用** |
+| `C:\Users\<用户>\.dsh\workbuddy-vault\cn` | 11-12 | `copilot.tencent.com` | ❌ 401 |
+| 插件自己的 `.vault\cn` | 11-12 | `copilot.tencent.com` | ❌ 401 |
+
+**排查 401 时必须核对所有 vault 位置，不能只看一处就下结论。**
+用 JWT 的 `iss` 字段能快速分辨新旧（`codebuddy.cn` 是新签发的）。
+
+### 坑 3：JWT 没过期 ≠ token 有效
+
+`138****6954` 的旧 token JWT `exp` 是 11-12（未过期），但服务端返回 **401**。
+
+**服务端可以主动作废 token**（换设备/改密/长期不用/被新登录顶掉）。
+判断 token 死活**只能实际调用**，不能只看 `exp`。
+
+### 导入时的正确做法
+
+`importFromDesktop` / `importFromDshVault` 必须是「**更新的覆盖旧的**」而不是「uid 相同就跳过」：
+
+```javascript
+// ❌ 错误：uid 相同就跳过 → 桌面端重新登录后 vault 还是旧 token
+if (existing.some((x) => x.uid === uid)) { skip; }
+
+// ✅ 正确：比较 expiresAtMs，更新的覆盖
+const sameUid = existing.find((x) => x.uid === uid);
+if (sameUid) {
+  if (newExp <= oldExp) skip;
+  else overwrite;
+}
+```
+
+同理，导入时**必须保留 `nickname` / `uin`**（`parseWorkBuddyAuth` 已经解出来了，别再写成空串）。
 
 ---
 
@@ -221,6 +286,44 @@ provider = [{
 
 ---
 
+## 改模型顺序（其它对话看这里）
+
+**只想调整机器人用模型的先后顺序时，改这一份文件：**
+
+```
+<AstrBot data>/cmd_config.json
+  → agent_runner.config.model.fallback_provider_ids[]
+```
+
+数组从上到下 = 优先顺序。改完刷新「轮换层」页面即可看到（插件读磁盘，不用重启）。
+
+### 两个轮换层，各管各的
+
+| 切换项 | 用途 | 顺序来自 | 改主链会影响它吗 |
+|---|---|---|---|
+| **通用 LLM 池 llm_pool** | 文本对话 | 上面那份 `fallback_provider_ids` | ✅ 会 |
+| **视觉轮换 vision** | 图片理解 | 插件自己的 `vision.priority` | ❌ 不会 |
+
+**不要把两边当成同一份。** 之前出过 bug：把两个都绑到主链，结果 vision 的图片顺序也被文本 fallback 带跑了。
+
+### 页面里改
+
+「扩展功能 → 本机模型接入 → 轮换层」：
+
+- 先选 **视觉轮换 vision** 或 **LLM 池 llm_pool**
+- ↑↓ 调顺序 → 点「保存并重启」
+- 只有 **llm_pool** 的保存会同步写回主链；**vision 不会动主链**
+
+### 常见疑问
+
+| 问 | 答 |
+|---|---|
+| 我在别的程序改了顺序，页面没变 | 确认改的是 `cmd_config.json` 的 `fallback_provider_ids`，不是插件的 `vision.priority` |
+| 页面显示「未在运行」 | AstrBot 重载后 shim 串行启动，等 20 秒，或看门狗 30 秒自愈 |
+| 某行标「shim 未加载」 | 主链里写了不存在的 provider（如 `hy4-preview`），不影响其它行，可删可不删 |
+| 改完要重启 AstrBot 吗 | 改文件不用；改插件 Python 代码才要（模块有缓存） |
+
+---
 ## 排查：按四层走
 
 机器人不说话，一定是这四层之一断了。**从下往上查，不要跳**。
@@ -296,6 +399,70 @@ Invoke-RestMethod "http://127.0.0.1:8788/v1/chat/completions" -Method Post `
 
 ---
 
+## WorkBuddy 域名（2026-11-10 迁移）
+
+国内区历史上用过三个域名，**目前统一到 `www.codebuddy.cn`**：
+
+| 域名 | 状态 | 能干什么 |
+|---|---|---|
+| `copilot.tencent.com` | 最老，已迁 | chat / 名册（2026-11-10 实测仍通，但不建议用） |
+| `www.workbuddy.cn` | 中间过渡 | chat / 名册 ✅，billing ❌ |
+| **`www.codebuddy.cn`** | **当前默认** | chat / 名册 / billing **三个都通** |
+
+代码里的定义：
+
+```javascript
+const CN_CHAT_BASE    = process.env.WB_CN_CHAT_BASE    || "https://www.codebuddy.cn";
+const CN_BILLING_BASE = process.env.WB_CN_BILLING_BASE || "https://www.codebuddy.cn";
+const CHAT_BASE    = REGION === "global" ? "https://www.workbuddy.ai" : CN_CHAT_BASE;
+const BILLING_BASE = REGION === "global" ? "https://www.codebuddy.ai" : CN_BILLING_BASE;
+```
+
+**回滚开关**（改环境变量即可，不用动代码）：
+
+```bash
+WB_CN_CHAT_BASE=https://www.workbuddy.cn      # 只换 chat
+WB_CN_BILLING_BASE=https://www.codebuddy.cn   # 只换 billing
+```
+
+### 实测方法
+
+换域名前先用一个真账号打三个端点，全通才改代码：
+
+```bash
+# 1) 名册
+curl -H "Authorization: Bearer $TOKEN" -H "User-Agent: WorkBuddy/1.0.0" \
+     https://www.codebuddy.cn/v3/config
+
+# 2) chat（必须 stream:true，否则 11101）
+curl -X POST https://www.codebuddy.cn/v2/chat/completions \
+     -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+     -H "User-Agent: WorkBuddy/1.0.0" -H "Accept: text/event-stream" \
+     -d '{"model":"hy3","messages":[{"role":"system","content":"hi"},{"role":"user","content":"hi"}],"max_tokens":20,"stream":true}'
+
+# 3) 余额
+curl -X POST https://www.codebuddy.cn/v2/billing/meter/get-user-resource \
+     -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+     -d '{"PageNumber":1,"PageSize":100,"ProductCode":"p_tcaca","Status":[0,3],
+          "PackageEndTimeRangeBegin":"2026-11-10 00:00:00",
+          "PackageEndTimeRangeEnd":"2127-11-10 00:00:00"}'
+```
+
+> `/v2/plugin/auth/state` 在 `www.workbuddy.cn` 上是 404，扫码登录仍走 `www.codebuddy.cn`。
+
+### vault 里的 domain 字段不用改
+
+凭据 JSON 里的 `auth.domain` 只用来**判断区域**：
+
+```javascript
+const isGlobal = domain.includes("workbuddy.ai");   // 含 .ai = global，否则 cn
+```
+
+所以 `copilot.tencent.com` / `www.codebuddy.cn` / `www.workbuddy.cn` 都会被正确判成 `cn`，
+**不需要迁移旧数据**。实际请求统一走 `CHAT_BASE`，跟这个字段无关。
+
+---
+
 ## 按客户端速查
 
 | 客户端 | 最常踩的 |
@@ -303,6 +470,100 @@ Invoke-RestMethod "http://127.0.0.1:8788/v1/chat/completions" -Method Post `
 | **Trae** | 必须设 `TRAE_AUTH_FILE`；模型名用 `config_name` 不是显示名；带工具调用历史会返回空（**v1.1.0 的 shim 已内置归一化**）|
 | **WorkBuddy** | 必须装桌面端（解密要问 app 要密钥）；模型 id 写错会静默返回空 |
 | **Qoder** | 用内部 key（`qoder-cn/qmodel_38max`）；国际区常排队；`/v1/models` 慢（10s+）|
+
+---
+
+## 账号池排查流程（照着走）
+
+### 症状：某个账号报 401 / 11140 / 额度查不到
+
+**第 1 步：别急着说是「token 失效」**
+
+先确认你用的是哪一份凭据。同一个账号可能散落在多个 vault：
+
+```
+D:\dev\dsh-home\workbuddy-vault\cn\        ← dsh-connect-workbuddy 的（会累积历史）
+C:\Users\<用户>\.dsh\workbuddy-vault\cn\   ← 旧的 dsh 位置（可能是过期副本）
+<插件目录>\shims\.vault\cn\                 ← 插件自己的
+%LOCALAPPDATA%\CodeBuddyExtension\...\auth\ ← 桌面端（只存当前登录）
+```
+
+**第 2 步：用 JWT 的 `iss` 快速分辨新旧**
+
+```javascript
+const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString());
+console.log(payload.iss);   // 含 codebuddy.cn / workbuddy.cn = 新；含 copilot.tencent.com = 旧
+console.log(new Date(payload.exp * 1000).toISOString());
+```
+
+**第 3 步：实际调用验证（唯二可信的判断方式）**
+
+```bash
+curl -X POST https://www.codebuddy.cn/v2/chat/completions \
+     -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+     -H "User-Agent: WorkBuddy/1.0.0" -H "Accept: text/event-stream" \
+     -H "X-User-Id: $UID" \
+     -d '{"model":"hy3","messages":[{"role":"system","content":"hi"},{"role":"user","content":"hi"}],"max_tokens":20,"stream":true}'
+```
+
+- `200` + 有 `delta` → 能用
+- `401` + HTML → **服务端作废了**，只能重新登录 / 扫码
+- `200` + `{"code":11140}` → 请求参数问题（常见于没带 `X-User-Id`）
+
+**第 4 步：确认该账号在所有位置都失效了，才判定要重新登录**
+
+### 症状：导入后界面显示「无昵称」
+
+`importFromDesktop` 里写死了 `nickname: ""`。
+`parseWorkBuddyAuth` 已经解出来了，要透传：
+
+```javascript
+nickname: cred.nickname || "",
+uin: cred.uin || "",
+```
+
+### 症状：桌面端重新登录了，但 vault 里还是旧 token
+
+导入逻辑是「uid 相同就跳过」。要改成比较有效期：
+
+```javascript
+const sameUid = existing.find((x) => x.uid === uid);
+if (sameUid) {
+  if (Number(cred.expiresAtMs || 0) <= Number(sameUid.expiresAtMs || 0)) {
+    skip;                      // vault 里的更新或一样新
+  } else {
+    overwrite;                 // 桌面端更新，覆盖
+  }
+}
+```
+
+### 症状：安全顾虑「提交会不会上传我的 token」
+
+每次提交前跑这个：
+
+```bash
+git add --dry-run -A
+```
+
+**输出里不应该出现任何 `vault` 路径。** 如果出现，说明 `.gitignore` 漏了。
+
+`.gitignore` 必须有的（注意 `*` 兜住所有变体）：
+
+```gitignore
+shims/.vault*
+shims/**/.vault*
+shims/.wb-cost.json
+shims/.vision-health.json
+shims/.llm-pool-health.json
+shims/.wb-models.json
+shims/.trae-cost.json
+shims/.qoder-cost.json
+shims/.vision-cost.json
+shims/.llm-pool-cost.json
+```
+
+**注意 `shims/.vault/` 只匹配目录，匹配不到 `shims/.vault.bak-xxx`** ——
+备份目录会带 token，必须用 `shims/.vault*` 兜住。
 
 ---
 
@@ -458,6 +719,25 @@ SKILL.md                **当前版本**：vX.Y.Z
 
 ---
 
+## 其它对话最小交接
+
+**精简版 skill（其它对话自动加载）物理存放在 D 盘**：
+`D:\dev\dsh-home\skills\astrbot-shim-connector\SKILL.md`，
+`C:\Users\31165\.agents\skills\astrbot-shim-connector` 是指向它的目录联接（junction）。
+改 skill 直接改 D 盘那份。
+
+改这个插件前只要知道三件事：
+
+1. **源码**在 `D:\9\new\astrbot_plugin_shim_connector\`，
+   **AstrBot 实际跑的**是 `D:\4game\ai\robot\core\data\plugins\astrbot_plugin_shim_connector\`。
+   改完源码要同步过去；改 `main.py` 还要重启 AstrBot（Python 模块有缓存），
+   改 `pages/*` 刷新页面即可。
+2. **没明确说「推送 / 上传 / 提交 github」就不 push**；说「不要更新版本」就不动版本号。
+3. **提交前 `git add --dry-run -A` 确认没有 `.vault`**，账号 token 绝不进仓库。
+
+改模型顺序只看上一章。其它细节（凭据、域名、端口、看门狗）在本文档其余章节里。
+
+---
 ## 给 agent 的操作要点
 
 1. **先问是哪一层**：插件页看见了吗 → `/shim` 显示什么 → provider 列表有没有 `<source_id>/`。这三个答案能定位 90% 的问题。

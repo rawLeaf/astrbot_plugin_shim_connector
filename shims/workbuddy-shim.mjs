@@ -43,8 +43,25 @@ const TOKEN = process.env.WB_SHIM_TOKEN ?? "sk-workbuddy-local";
 const HOST = "127.0.0.1";
 const REGION = process.env.WB_REGION ?? "cn";
 
-const CHAT_BASE = REGION === "global" ? "https://www.workbuddy.ai" : "https://copilot.tencent.com";
-const BILLING_BASE = REGION === "global" ? "https://www.codebuddy.ai" : "https://www.codebuddy.cn";
+// 国内区统一走 www.codebuddy.cn（2026-11-10）
+//
+// 历史沿革：
+//   copilot.tencent.com    最早的 chat 域名（已迁）
+//   www.workbuddy.cn       中间过渡（chat/名册可以，billing 不行）
+//   www.codebuddy.cn       现在：chat / 名册 / billing 三个都通
+//
+// 实测（2026-11-10，同一个 cn 账号）：
+//   /v3/config                         HTTP 200  66 个模型
+//   /v2/chat/completions               HTTP 200  有内容
+//   /v2/billing/meter/get-user-resource HTTP 200  积分 1731
+//
+// 回滚：
+//   WB_CN_CHAT_BASE=https://www.workbuddy.cn        （只换 chat）
+//   WB_CN_BILLING_BASE=https://www.codebuddy.cn     （只换 billing）
+const CN_CHAT_BASE = process.env.WB_CN_CHAT_BASE || "https://www.codebuddy.cn";
+const CN_BILLING_BASE = process.env.WB_CN_BILLING_BASE || "https://www.codebuddy.cn";
+const CHAT_BASE = REGION === "global" ? "https://www.workbuddy.ai" : CN_CHAT_BASE;
+const BILLING_BASE = REGION === "global" ? "https://www.codebuddy.ai" : CN_BILLING_BASE;
 
 // ── 常量（源自 dsh-connect-workbuddy，MIT）──────────────────────────
 const WORKBUDDY_LIVE_FILENAME = "workbuddy-desktop.info";
@@ -451,7 +468,7 @@ function writeVaultFile(region, account) {
       refreshToken: account.refreshToken || "",
       expiresAt: Math.floor((account.expiresAtMs || 0) / 1000),
       refreshExpiresAt: Math.floor((account.refreshExpiresAtMs || 0) / 1000),
-      domain: account.domain || (region === "global" ? "www.workbuddy.ai" : "copilot.tencent.com"),
+      domain: account.domain || (region === "global" ? "www.workbuddy.ai" : "www.codebuddy.cn"),
     },
     account: {
       uid: account.uid || "",
@@ -479,7 +496,7 @@ function deleteVaultFile(region, accountId) {
 }
 
 /** 列出某区所有账号（含余额，异步）。 */
-async function listVaultAccountsWithBalance(region, withBalance = true) {
+async function listVaultAccountsWithBalance(region, withBalance = true, force = false) {
   const base = listVaultAccounts(region);
   if (!withBalance) return base;
 
@@ -496,7 +513,7 @@ async function listVaultAccountsWithBalance(region, withBalance = true) {
         uid: a.uid,
         domain: a.domain,
         accountId: a.accountId,
-      }).catch(() => null);
+      }, force).catch(() => null);
       return {
         ...item,
         credit: bal ? bal.credit : null,
@@ -935,10 +952,32 @@ async function importFromDesktop(dryRun = false) {
       const existing = listVaultFiles(region)
         .map((x) => readVaultFile(x.path))
         .filter(Boolean);
-      if (existing.some((x) => x.uid === uid && uid !== "")) {
-        result.skipped += 1;
-        result.details.push({ region, accountId, action: "skip", reason: "已存在" });
-        continue;
+      const sameUid = uid !== "" ? existing.find((x) => x.uid === uid) : null;
+
+      if (sameUid) {
+        // 已存在同 uid 的账号 —— 比较有效期决定是否覆盖
+        //
+        // 2026-11-10 修正：原来越过一律跳过，导致桌面端重新登录后
+        // vault 里仍是旧 token（旧 token 服务端可能已作废，但界面看不出）。
+        // 现在：桌面端凭据更晚过期就覆盖它。
+        const newExp = Number(cred.expiresAtMs || 0);
+        const oldExp = Number(sameUid.expiresAtMs || 0);
+        if (newExp <= oldExp) {
+          result.skipped += 1;
+          result.details.push({
+            region,
+            accountId,
+            action: "skip",
+            reason: `vault 里的更晚（${new Date(oldExp).toISOString().slice(0, 10)} >= ${new Date(newExp).toISOString().slice(0, 10)}）`,
+          });
+          continue;
+        }
+        result.details.push({
+          region,
+          accountId,
+          action: "overwrite",
+          reason: `桌面端更新（${new Date(oldExp).toISOString().slice(0, 10)} → ${new Date(newExp).toISOString().slice(0, 10)}）`,
+        });
       }
 
       if (!dryRun) {
@@ -948,10 +987,11 @@ async function importFromDesktop(dryRun = false) {
           refreshToken: cred.refreshToken || "",
           expiresAtMs: Number(cred.expiresAtMs || 0),
           refreshExpiresAtMs: 0,
-          domain: cred.domain || (region === "global" ? "www.workbuddy.ai" : "copilot.tencent.com"),
+          domain: cred.domain || (region === "global" ? "www.workbuddy.ai" : "www.codebuddy.cn"),
           uid,
-          nickname: "",
-          uin: "",
+          // parseWorkBuddyAuth 已经解出 nickname / uin，之前写死空串导致界面上账号没名字
+          nickname: cred.nickname || "",
+          uin: cred.uin || "",
         });
       }
       result.imported += 1;
@@ -1086,7 +1126,7 @@ async function oauthPoll(loginId) {
     refreshToken,
     expiresAtMs,
     refreshExpiresAtMs,
-    domain: domain || (s.region === "global" ? "www.workbuddy.ai" : "copilot.tencent.com"),
+    domain: domain || (s.region === "global" ? "www.workbuddy.ai" : "www.codebuddy.cn"),
     uid,
     nickname,
     uin,
@@ -1632,7 +1672,7 @@ async function resolvePeerCredential() {
         accessToken: v.accessToken,
         refreshToken: v.refreshToken,
         expiresAtMs: v.expiresAtMs,
-        domain: v.domain || (PEER_REGION === "global" ? "www.workbuddy.ai" : "copilot.tencent.com"),
+        domain: v.domain || (PEER_REGION === "global" ? "www.workbuddy.ai" : "www.codebuddy.cn"),
         uid: v.uid,
         accountId: v.accountId,
         source: "vault",
@@ -1676,7 +1716,7 @@ async function resolvePeerCredential() {
       cred = parseWorkBuddyAuth(text, key);
     }
     if (cred && cred.accessToken) {
-      cred.domain = PEER_REGION === "global" ? "www.workbuddy.ai" : "copilot.tencent.com";
+      cred.domain = PEER_REGION === "global" ? "www.workbuddy.ai" : "www.codebuddy.cn";
       peerCredCache = cred;
       peerCredAt = Date.now();
       console.error("[workbuddy-shim] 跨区兜底：已加载 " + PEER_REGION + " 区凭据");
@@ -1701,7 +1741,7 @@ async function resolveCredential() {
         accessToken: v.accessToken,
         refreshToken: v.refreshToken,
         expiresAtMs: v.expiresAtMs,
-        domain: v.domain || (REGION === "global" ? "www.workbuddy.ai" : "copilot.tencent.com"),
+        domain: v.domain || (REGION === "global" ? "www.workbuddy.ai" : "www.codebuddy.cn"),
         uid: v.uid,
         accountId: v.accountId,
         source: "vault",
@@ -1779,7 +1819,7 @@ async function resolveCredential() {
 
 /** 上游要求的全套 CLI 形态请求头。 */
 function buildHeaders(cred) {
-  const domain = cred.domain || (REGION === "global" ? "www.workbuddy.ai" : "copilot.tencent.com");
+  const domain = cred.domain || (REGION === "global" ? "www.workbuddy.ai" : "www.codebuddy.cn");
   return {
     "Authorization": "Bearer " + cred.accessToken,
     "Content-Type": "application/json",
@@ -1915,7 +1955,7 @@ const CROSS_REGION = (process.env.WB_CROSS_REGION ?? "1") !== "0";
 
 /** 跨区映射：本区 → 对端区。 */
 const PEER_REGION = REGION === "global" ? "cn" : "global";
-const PEER_BASE = PEER_REGION === "global" ? "https://www.workbuddy.ai" : "https://copilot.tencent.com";
+const PEER_BASE = PEER_REGION === "global" ? "https://www.workbuddy.ai" : "https://www.codebuddy.cn";
 
 /** 是否属于「额度/余额问题」——这类才值得跨区重试。 */
 function isQuotaError(text) {
@@ -2078,7 +2118,7 @@ async function handleChat(req, res) {
         if (next && next.accountId !== credential.accountId) {
           const nextHeaders = buildHeaders({
             ...next,
-            domain: next.domain || (REGION === "global" ? "www.workbuddy.ai" : "copilot.tencent.com"),
+            domain: next.domain || (REGION === "global" ? "www.workbuddy.ai" : "www.codebuddy.cn"),
           });
           const retryRes = await fetch(CHAT_BASE + "/v2/chat/completions", {
             method: "POST",
@@ -2152,7 +2192,7 @@ async function handleChat(req, res) {
       try {
         const peer = await resolvePeerCredential();
         if (peer) {
-          const peerHeaders = { ...buildHeaders(peer), "X-Domain": PEER_REGION === "global" ? "www.workbuddy.ai" : "copilot.tencent.com" };
+          const peerHeaders = { ...buildHeaders(peer), "X-Domain": PEER_REGION === "global" ? "www.workbuddy.ai" : "www.codebuddy.cn" };
           const peerRes = await fetch(PEER_BASE + "/v2/chat/completions", {
             method: "POST",
             headers: peerHeaders,
@@ -2387,11 +2427,17 @@ const server = createServer((req, res) => {
       const region = /[?&]region=(global|cn)\b/.exec(url)?.[1] || REGION;
       // ?balance=0 可跳过余额查询（更快）
       const withBalance = !/[?&]balance=0\b/.test(url);
-      const accounts = await listVaultAccountsWithBalance(region, withBalance);
+      // ?refresh=1 强制回源查余额，绕过 5 分钟缓存
+      const forceRefresh = /[?&]refresh=1\b/.test(url);
+      const accounts = await listVaultAccountsWithBalance(region, withBalance, forceRefresh);
+      if (forceRefresh) {
+        console.error("[workbuddy-shim] 余额已强制刷新（" + region + "）");
+      }
       sendJson(res, 200, {
         ok: true,
         region,
         vaultDir: vaultDirOf(region),
+        forceRefresh,
         accounts,
       });
     })().catch((e) => {
@@ -2506,10 +2552,10 @@ const server = createServer((req, res) => {
 
       // 用该账号发一个最小请求
       const testModel = String(body.model || "hy3");
-      const chatBase = region === "global" ? "https://www.workbuddy.ai" : "https://copilot.tencent.com";
+      const chatBase = region === "global" ? "https://www.workbuddy.ai" : "https://www.codebuddy.cn";
       const cred = {
         accessToken: acc.accessToken,
-        domain: acc.domain || (region === "global" ? "www.workbuddy.ai" : "copilot.tencent.com"),
+        domain: acc.domain || (region === "global" ? "www.workbuddy.ai" : "www.codebuddy.cn"),
         uid: acc.uid,
         accountId: acc.accountId,
       };

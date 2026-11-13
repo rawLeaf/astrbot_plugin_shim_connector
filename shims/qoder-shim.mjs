@@ -15,7 +15,7 @@
 
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
-import {existsSync, readFileSync, writeFileSync } from "node:fs";
+import {existsSync, readFileSync, writeFileSync, readdirSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
@@ -149,6 +149,131 @@ const REGIONS = {
   },
 };
 
+
+// ── Qoder 账号池 ────────────────────────────────────────────
+//
+// Qoder 桌面端每区只有一份 auth.v1.dat（单账号）。
+// 账号池把「解出来的凭据」存到 agent 自己的 vault：
+//   .qoder-vault/<region>/<accountId>.json
+// 每条包含 userID / token / machineID / name / email。
+//
+// 2026-11-13：参照 dsh-connect-qoder 的凭据模型，补多账号支持。
+
+const QODER_VAULT = process.env.QODER_VAULT_DIR ||
+  join(fileURLToPath(new URL(".", import.meta.url)), ".qoder-vault");
+
+/** 账号 id：sha256(region + userID) 前 24 位。 */
+function qoderAccountId(region, userID) {
+  return crypto.createHash("sha256")
+    .update(String(region) + "\0" + String(userID))
+    .digest("hex").slice(0, 24);
+}
+
+function qoderVaultDir(region) {
+  return join(QODER_VAULT, region);
+}
+
+function ensureQoderVault(region) {
+  const d = qoderVaultDir(region);
+  try { mkdirSync(d, { recursive: true, mode: 0o700 }); } catch { /* exists */ }
+  return d;
+}
+
+function qoderVaultFiles(region) {
+  const d = qoderVaultDir(region);
+  let entries = [];
+  try { entries = readdirSync(d); } catch { return []; }
+  return entries.filter((n) => /\.json$/.test(n))
+    .map((n) => ({ accountId: n.replace(/\.json$/, ""), path: join(d, n) }));
+}
+
+function readQoderVault(path) {
+  try {
+    const doc = JSON.parse(readFileSync(path, "utf8").replace(/^\uFEFF/, ""));
+    if (doc && typeof doc.token === "string" && doc.token !== "") return doc;
+  } catch { /* bad file */ }
+  return null;
+}
+
+function writeQoderVault(region, cred) {
+  const d = ensureQoderVault(region);
+  const accountId = qoderAccountId(region, cred.userID);
+  const target = join(d, accountId + ".json");
+  const tmp = target + ".tmp." + process.pid;
+  const doc = {
+    version: 1,
+    accountId,
+    region,
+    refreshedAtMs: Date.now(),
+    userID: cred.userID || "",
+    token: cred.token || "",
+    machineID: cred.machineID || "",
+    name: cred.name || "",
+    email: cred.email || "",
+    expiresAtMs: Number(cred.expiresAtMs || 0),
+  };
+  if (doc.token === "" || doc.userID === "") return null;
+  writeFileSync(tmp, JSON.stringify(doc, null, 2), { encoding: "utf8", mode: 0o600 });
+  renameSync(tmp, target);
+  return accountId;
+}
+
+/** 列出 vault 账号（脱敏）。 */
+function listQoderAccounts(region) {
+  return qoderVaultFiles(region).map((f) => {
+    const a = readQoderVault(f.path);
+    if (!a) return { accountId: f.accountId, region, valid: false };
+    const exp = Number(a.expiresAtMs || 0);
+    return {
+      accountId: a.accountId,
+      region,
+      valid: true,
+      nickname: a.name || a.email || a.userID,
+      email: a.email || "",
+      userID: a.userID || "",
+      expiresAtMs: exp,
+      expired: exp > 0 && exp < Date.now(),
+      remainingMs: exp > 0 ? Math.max(0, exp - Date.now()) : null,
+    };
+  });
+}
+
+/** sticky + 冷却。 */
+const stickyQoder = new Map();      // region → accountId
+const qoderCooldown = new Map();    // accountId → 到期时间
+
+function pickQoderAccount(region) {
+  const files = qoderVaultFiles(region);
+  if (files.length === 0) return null;
+  const now = Date.now();
+  const cands = [];
+  for (const f of files) {
+    const a = readQoderVault(f.path);
+    if (!a) continue;
+    if ((qoderCooldown.get(a.accountId) || 0) > now) continue;
+    cands.push(a);
+  }
+  if (cands.length === 0) {
+    if (qoderCooldown.size > 0) { qoderCooldown.clear(); return pickQoderAccount(region); }
+    return null;
+  }
+  const sticky = stickyQoder.get(region);
+  if (sticky) {
+    const hit = cands.find((a) => a.accountId === sticky);
+    if (hit) return hit;
+  }
+  stickyQoder.set(region, cands[0].accountId);
+  return cands[0];
+}
+
+function coolDownQoder(accountId, minutes = 30) {
+  if (!accountId) return;
+  qoderCooldown.set(accountId, Date.now() + minutes * 60000);
+  for (const [r, id] of stickyQoder.entries()) {
+    if (id === accountId) stickyQoder.delete(r);
+  }
+  console.error("[QODER-shim] 账号 " + accountId.slice(0, 12) + " 冷却 " + minutes + " 分钟");
+}
 // ── DPAPI 解包 ────────────────────────────────────────────────────────
 const PS = `$ErrorActionPreference='Stop'
 Add-Type -TypeDefinition @'
@@ -167,6 +292,22 @@ $raw=[Convert]::FromBase64String($json.os_crypt.encrypted_key)
 const credCache = new Map();
 
 function loadCredential(regionId) {
+  // 1) 账号池优先：vault 里有就用，支持多账号轮换
+  const pooled = pickQoderAccount(regionId);
+  if (pooled) {
+    return {
+      userID: pooled.userID,
+      token: pooled.token,
+      name: pooled.name || "",
+      email: pooled.email || "",
+      machineID: pooled.machineID || "",
+      accountId: pooled.accountId,
+      source: "vault",
+      expiresAtMs: Number(pooled.expiresAtMs || 0),
+    };
+  }
+
+  // 2) 桌面端单账号（原逻辑）
   if (credCache.has(regionId)) return credCache.get(regionId);
   const r = REGIONS[regionId];
   const ps = spawnSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", PS], {
@@ -690,23 +831,67 @@ async function handleChat(req, res) {
   const controller = new AbortController();
   res.on("close", () => controller.abort());
 
-  let upstream;
-  try {
-    upstream = await fetch(url, {
-      method: "POST",
-      headers,
-      body,
-      redirect: "error",
-      signal: AbortSignal.any([controller.signal, AbortSignal.timeout(180000)]),
-    });
-  } catch (error) {
-    sendError(res, 502, "transport error: " + String(error), "server");
+  // 账号池：额度/鉴权失败时自动换下一个账号重试
+  const MAX_TRIES = Number(process.env.QODER_ACCOUNT_RETRY ?? "3");
+  let upstream = null;
+  let lastError = "";
+  let usedCred = cred;
+
+  for (let attempt = 0; attempt < MAX_TRIES; attempt++) {
+    if (attempt > 0) {
+      const next = pickQoderAccount(region);
+      if (!next) {
+        console.error("[QODER-shim] 没有更多可用账号，放弃重试");
+        break;
+      }
+      usedCred = next;
+      // 换账号后必须重算签名头（uid/token 变了）
+      Object.assign(headers, authHeaders(body, url, {
+        userID: next.userID, token: next.token,
+        name: next.name || "", email: next.email || "",
+        machineID: next.machineID || "",
+      }));
+      console.error("[QODER-shim] 换账号重试：" +
+        String(next.name || next.accountId || "").slice(0, 20));
+    }
+
+    try {
+      upstream = await fetch(url, {
+        method: "POST",
+        headers,
+        body,
+        redirect: "error",
+        signal: AbortSignal.any([controller.signal, AbortSignal.timeout(180000)]),
+      });
+    } catch (error) {
+      lastError = "transport error: " + String(error);
+      continue;
+    }
+
+    if (upstream.ok) break;
+
+    const t = (await upstream.text()).slice(0, 600);
+    lastError = t || ("upstream " + upstream.status);
+
+    const quotaLike = upstream.status === 401 || upstream.status === 403 ||
+      /quota|limit|exceed|insufficient|balance|credit|too many|额度|超限/i.test(t);
+    if (!quotaLike) {
+      sendError(res, upstream.status === 401 ? 401 : 502, lastError, "upstream");
+      return;
+    }
+
+    if (usedCred.accountId) coolDownQoder(usedCred.accountId, 30);
+    console.error("[QODER-shim] 账号 " + String(usedCred.accountId || "?").slice(0, 12) + " 触发限制，准备换号");
+    upstream = null;
+  }
+
+  if (upstream === null) {
+    sendError(res, 502, lastError || "所有账号均不可用", "upstream");
     return;
   }
 
   if (!upstream.ok) {
-    const t = (await upstream.text()).slice(0, 600);
-    sendError(res, upstream.status === 401 ? 401 : 502, t || "upstream " + upstream.status, "upstream");
+    sendError(res, 502, lastError || "upstream error", "upstream");
     return;
   }
   // 上游用 200 + 错误帧表达排队，这里先探一次再决定
@@ -780,6 +965,174 @@ async function handleChat(req, res) {
 const server = createServer((req, res) => {
   const url = req.url ?? "/";
   // 耗费统计
+  if (req.method === "POST" && (url === "/accounts/test" || url.startsWith("/accounts/test?"))) {
+    (async () => {
+      let body = {};
+      try {
+        const raw = (await readBody(req)).toString("utf8");
+        if (raw.trim() !== "") body = JSON.parse(raw);
+      } catch { /* ignore */ }
+      const id = String(body.accountId || "");
+      const region = String(body.region || "qoder-cn");
+      const hit = qoderVaultFiles(region).find((x) => x.accountId === id);
+      if (!hit) { sendError(res, 404, "账号不存在: " + id, "not_found"); return; }
+      const a = readQoderVault(hit.path);
+      if (!a) { sendError(res, 400, "账号文件损坏", "bad_file"); return; }
+
+      // 用该账号拉一次模型名册（最轻的上游校验，不烧 token）
+      const started = Date.now();
+      let ok = false, message = "", latencyMs = null;
+      try {
+        const r = REGIONS[region];
+        const url = r.baseUrl + "algo/api/v2/model/list?Encode=1";
+        const credential = {
+          userID: a.userID, token: a.token,
+          name: a.name || "", email: a.email || "", machineID: a.machineID || "",
+        };
+        const resp = await fetch(url, {
+          method: "GET",
+          headers: { ...authHeaders(Buffer.alloc(0), url, credential), Accept: "application/json" },
+          redirect: "error",
+          signal: AbortSignal.timeout(45000),
+        });
+        latencyMs = Date.now() - started;
+        const t = await resp.text();
+        ok = resp.ok;
+        message = ok ? "正常" : (t.slice(0, 80) || ("HTTP " + resp.status));
+      } catch (e) {
+        latencyMs = Date.now() - started;
+        message = String(e).includes("timeout") ? "超时" : "网络错误";
+      }
+      sendJson(res, 200, { ok, accountId: id, region, latencyMs, message });
+    })().catch((e) => { if (!res.headersSent) sendError(res, 500, String(e), "internal"); });
+    return;
+  }
+
+  // ── Qoder 账号池接口 ───────────────────────────────────────
+  if (req.method === "GET" && (url === "/accounts" || url.startsWith("/accounts?"))) {
+    const region = /[?&]region=(qoder-cn|qoder)\b/.exec(url)?.[1] || "qoder-cn";
+    sendJson(res, 200, {
+      ok: true,
+      region,
+      vaultDir: qoderVaultDir(region),
+      current: stickyQoder.get(region) || null,
+      accounts: listQoderAccounts(region),
+    });
+    return;
+  }
+
+  if (req.method === "GET" && (url === "/accounts/current" || url.startsWith("/accounts/current?"))) {
+    const region = /[?&]region=(qoder-cn|qoder)\b/.exec(url)?.[1] || "qoder-cn";
+    let cur = null;
+    try {
+      const cred = loadCredential(region);
+      cur = {
+        accountId: cred.accountId || "(desktop)",
+        nickname: cred.name || cred.email || cred.userID || "",
+        userID: cred.userID || "",
+        source: cred.source || "desktop",
+      };
+    } catch { /* 没登录 */ }
+    const now = Date.now();
+    const cooling = [];
+    for (const [id, until] of qoderCooldown.entries()) {
+      if (until > now) cooling.push({ accountId: id, remainMin: Math.round((until - now) / 60000) });
+    }
+    sendJson(res, 200, { ok: true, region, current: cur, sticky: stickyQoder.get(region) || null, cooling });
+    return;
+  }
+
+  // 扫描：把桌面端当前登录账号解出来（Qoder 只有一个登录位）
+  if (req.method === "GET" && (url === "/accounts/scan" || url.startsWith("/accounts/scan?"))) {
+    const found = [];
+    for (const rid of ["qoder-cn", "qoder"]) {
+      try {
+        const r = REGIONS[rid];
+        if (!r || !existsSync(r.dir + "\\auth.v1.dat")) continue;
+        const cred = loadCredential(rid);
+        if (!cred || !cred.userID) continue;
+        const accountId = cred.accountId || qoderAccountId(rid, cred.userID);
+        const inVault = qoderVaultFiles(rid).some((x) => x.accountId === accountId);
+        found.push({
+          region: rid,
+          accountId,
+          nickname: cred.name || cred.email || cred.userID,
+          userID: cred.userID,
+          from: "desktop:" + rid,
+          inVault,
+        });
+      } catch { /* 该区没登录 */ }
+    }
+    sendJson(res, 200, { ok: true, found });
+    return;
+  }
+
+  // 导入：把桌面端账号写进 vault
+  if (req.method === "POST" && (url === "/accounts/import" || url.startsWith("/accounts/import?"))) {
+    (async () => {
+      let body = {};
+      try {
+        const raw = (await readBody(req)).toString("utf8");
+        if (raw.trim() !== "") body = JSON.parse(raw);
+      } catch { /* ignore */ }
+      const only = String(body.region || "");
+      const imported = [];
+      for (const rid of ["qoder-cn", "qoder"]) {
+        if (only && rid !== only) continue;
+        try {
+          const r = REGIONS[rid];
+          if (!r || !existsSync(r.dir + "\\auth.v1.dat")) continue;
+          const cred = loadCredential(rid);
+          if (!cred || !cred.userID) continue;
+          const id = writeQoderVault(rid, cred);
+          if (id) imported.push({ region: rid, accountId: id });
+        } catch { /* 跳过 */ }
+      }
+      console.error("[QODER-shim] 导入 " + imported.length + " 个账号");
+      sendJson(res, 200, { ok: true, imported, accounts: {
+        "qoder-cn": listQoderAccounts("qoder-cn"),
+        qoder: listQoderAccounts("qoder"),
+      } });
+    })().catch((e) => { if (!res.headersSent) sendError(res, 500, String(e), "internal"); });
+    return;
+  }
+
+  if (req.method === "POST" && (url === "/accounts/switch" || url.startsWith("/accounts/switch?"))) {
+    (async () => {
+      let body = {};
+      try {
+        const raw = (await readBody(req)).toString("utf8");
+        if (raw.trim() !== "") body = JSON.parse(raw);
+      } catch { /* ignore */ }
+      const id = String(body.accountId || "");
+      const region = String(body.region || "qoder-cn");
+      const hit = qoderVaultFiles(region).find((x) => x.accountId === id);
+      if (!hit) { sendError(res, 404, "账号不存在: " + id, "not_found"); return; }
+      stickyQoder.set(region, id);
+      qoderCooldown.delete(id);
+      sendJson(res, 200, { ok: true, current: id, region });
+    })().catch((e) => { if (!res.headersSent) sendError(res, 500, String(e), "internal"); });
+    return;
+  }
+
+  if (req.method === "POST" && (url === "/accounts/delete" || url.startsWith("/accounts/delete?"))) {
+    (async () => {
+      let body = {};
+      try {
+        const raw = (await readBody(req)).toString("utf8");
+        if (raw.trim() !== "") body = JSON.parse(raw);
+      } catch { /* ignore */ }
+      const id = String(body.accountId || "");
+      const region = String(body.region || "qoder-cn");
+      const hit = qoderVaultFiles(region).find((x) => x.accountId === id);
+      if (!hit) { sendError(res, 404, "账号不存在: " + id, "not_found"); return; }
+      try { unlinkSync(hit.path); } catch { /* ignore */ }
+      if (stickyQoder.get(region) === id) stickyQoder.delete(region);
+      sendJson(res, 200, { ok: true, deleted: id });
+    })().catch((e) => { if (!res.headersSent) sendError(res, 500, String(e), "internal"); });
+    return;
+  }
+
   if (req.method === "GET" && (url === "/cost" || url.startsWith("/cost?"))) {
     sendJson(res, 200, buildCostResponse());
     return;

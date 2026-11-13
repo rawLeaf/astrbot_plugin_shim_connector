@@ -7,6 +7,104 @@
 
 ---
 
+## [1.7.0] — 2026-11-13
+
+### 新增：Trae / Qoder 账号池
+
+账号池从「只有 WorkBuddy」扩展到三家全支持。页面顶部加 `[WorkBuddy] [Trae] [Qoder]` 切换。
+
+#### Trae 账号池
+
+参照 [dsh-connect-trae](https://github.com/dingminhua/dsh-connect-trae) 的凭据模型：
+
+- 账号 id = `sha256(edition + userId)` 前 24 位（与 dsh 完全一致）
+- 点「检测本地账号」自动扫 `D:\dev\dsh-home\.trae-auth.cn.json`，一次导入全部账号
+- 额度用尽自动换号（冷却 30 分钟）
+- vault：`shims/.trae-vault/cn/<accountId>.json`
+
+#### Qoder 账号池
+
+参照 [@eghrhegpe/dsh-connect-qoder](https://github.com/eghrhegpe/dsh-connect-qoder) 的凭据模型：
+
+- 分国内（`qoder-cn`）和国际（`qoder`）两区，各自独立成池
+- 解密桌面端 `auth.v1.dat`（OSCrypt + DPAPI）后存 vault
+- 保留 `userID / token / machineID / name / email` 五个字段（COSY 签名需要 machineID）
+- 换账号时重算 COSY 签名头
+- vault：`shims/.qoder-vault/<region>/<accountId>.json`
+
+> Qoder 桌面端每区只有一个登录位，所以只能「当前登录什么就存什么」。
+> 在 Qoder 客户端切换账号再点一次「检测本地账号」，就会多一个。
+
+#### 统一接口
+
+7 个账号接口都支持 `?shim=workbuddy|trae|qoder`：
+
+```
+GET  /accounts          POST /accounts/import
+GET  /accounts/current  POST /accounts/switch
+GET  /accounts/scan     POST /accounts/delete
+                        POST /accounts/test
+```
+
+### 新增：积分强制刷新
+
+余额默认缓存 5 分钟，之前点「刷新」拿的还是缓存值。
+
+- shim 加 `?refresh=1`，绕过缓存回源查询
+- 账号池加「刷新积分」按钮
+- 顶部「刷新」在账号池页也走强制刷新
+
+### 修复：轮换层顺序不跟随主链
+
+**根因**：两套配置互不相通。页面读插件自己的 `vision.priority`（11-09 后没动过），
+而用户在别的程序改的是 `cmd_config.json` 的 `fallback_provider_ids`。
+
+- `llm_pool`（文本）→ 跟随主链 `fallback_provider_ids`，保存时同步写回
+- `vision`（图片）→ 保持自己独立的 `vision.priority`，不受主链影响
+- 读主链**优先读磁盘**（用户可能在别的程序直接改文件）
+- 写主链必须改 `default_conf` 内存对象再 `save_config()`，否则被内存态覆盖
+
+### 修复：WorkBuddy 导入与域名
+
+- 导入时改为「桌面端更新就覆盖」，不再 uid 相同就跳过（之前导致 vault 里一直是旧 token）
+- 导入时保留 `nickname` / `uin`（`parseWorkBuddyAuth` 早就解出来了，被写死成空串丢掉）
+- 国内区域名统一 `www.codebuddy.cn`（chat / 名册 / billing 三个都通）
+  - 回滚：`WB_CN_CHAT_BASE` / `WB_CN_BILLING_BASE`
+
+### 新增：看门狗
+
+AstrBot 重载插件后，shim 子进程可能被系统回收，用户会看到「未在运行（端口空闲）」。
+
+- 每 30 秒检查一次：配置启用但端口没听 → 自动拉起
+- `terminate` 里取消，`initialize` 重新挂
+- 前端同时加「启动中」重试（最多 20 秒），不再一上来就报错
+
+### 修复：页面启动空窗
+
+插件串行启动 5 个 shim，`llm_pool` 永远最后（约 7 秒）。
+这期间点开页面会报「llm_pool 未在运行」。
+
+- `withStartupRetry()` 检查 `status.shims[].running`，每 1.5 秒重试，最多 20 秒
+- 账号池 / 模型名册 / 耗费 / 轮换层四个页面都加了
+
+### 安全
+
+- `.gitignore` 加固：`shims/.vault*` / `shims/.trae-vault*` / `shims/.qoder-vault*`
+  （原来只写 `shims/.vault/`，匹配不到 `.vault.bak-xxx`）
+- 提交前 `git add --dry-run -A` 验证不含任何 vault 路径
+
+### 文档
+
+SKILL.md 新增三章：
+
+- 「改模型顺序（其它对话看这里）」—— 只讲改顺序，不讲插件开发
+- 「其它对话最小交接」—— 三条铁律（不擅自 push / 不擅自升版本 / 提交前查 vault）
+- WorkBuddy 凭据的三个大坑 + 域名迁移表
+
+精简版 skill 物理存放在 `D:\dev\dsh-home\skills\astrbot-shim-connector\SKILL.md`。
+
+---
+
 ## [1.6.5] — 2026-11-09
 
 ### 新增：轮换层说明与跳过提示
