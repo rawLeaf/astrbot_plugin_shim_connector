@@ -800,7 +800,7 @@ class ShimConnector(Star):
                         )
                         continue
 
-                    # ── 两道都不满足，才拉起 ──
+                    # ── 三道都不满足，才拉起 ──
                     logger.warning(
                         f"[shim_connector] 看门狗发现 {name} (:{port}) 未运行，自动拉起"
                     )
@@ -1182,18 +1182,61 @@ class ShimConnector(Star):
         try:
             creation = 0
             if sys.platform == "win32":
-                creation = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                # CREATE_NO_WINDOW       不弹黑窗
+                # CREATE_BREAKAWAY_FROM_JOB  脱离父进程的 Job Object
+                # CREATE_NEW_PROCESS_GROUP   自己的进程组
+                #
+                # ⚠️ 2026-11-13 关键：为什么必须 BREAKAWAY
+                #
+                # 用户用 停止-AstrBot.bat 停服务，里面是：
+                #     taskkill /PID <astrbot> /T /F
+                # 其中 /T = 终止整棵进程树，**包括所有子进程**。
+                #
+                # shim 是 AstrBot 用 Popen 起的，天然是子进程，
+                # 所以每次重启 AstrBot，5 个 shim 全部被连带杀掉，
+                # 表现为「shim 不定期消失 + Connection error 集中爆发」。
+                #
+                # CREATE_BREAKAWAY_FROM_JOB 让子进程脱离父进程的 Job，
+                # taskkill /T 就杀不到它了（它不再是「树」的一部分）。
+                # DETACHED_PROCESS 让它独立于父控制台。
+                creation = (
+                    getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                    | getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x01000000)
+                    | getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+                )
             # 输出写文件而不是 DEVNULL，这样出问题能回溯
             log_file = open(log_path, "ab", buffering=0)  # noqa: SIM115
             try:
-                proc = subprocess.Popen(
-                    [node, str(script)],
-                    cwd=str(script.parent),
-                    env=env,
-                    stdout=log_file,
-                    stderr=subprocess.STDOUT,
-                    creationflags=creation,
-                )
+                try:
+                    proc = subprocess.Popen(
+                        [node, str(script)],
+                        cwd=str(script.parent),
+                        env=env,
+                        stdout=log_file,
+                        stderr=subprocess.STDOUT,
+                        creationflags=creation,
+                    )
+                except OSError as exc:
+                    # CREATE_BREAKAWAY_FROM_JOB 在父进程不属于任何 Job 时
+                    # 会报 ERROR_ACCESS_DENIED (0x5)。降级到只用 NO_WINDOW。
+                    if sys.platform == "win32" and getattr(exc, "winerror", None) == 5:
+                        logger.warning(
+                            f"[shim_connector] {name} 无法脱离父 Job，降级启动"
+                        )
+                        fallback = (
+                            getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                            | getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+                        )
+                        proc = subprocess.Popen(
+                            [node, str(script)],
+                            cwd=str(script.parent),
+                            env=env,
+                            stdout=log_file,
+                            stderr=subprocess.STDOUT,
+                            creationflags=fallback,
+                        )
+                    else:
+                        raise
             finally:
                 log_file.close()  # 父进程关句柄，子进程仍持有
             self.procs[name] = proc

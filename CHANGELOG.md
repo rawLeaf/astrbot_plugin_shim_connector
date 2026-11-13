@@ -7,6 +7,51 @@
 
 ---
 
+## [1.7.2] — 2026-11-13
+
+### 新增：项目铁律 AGENTS.md
+
+新建 `AGENTS.md`，把所有必须遵守的规则写清楚，任何接手的 AI 都会先读到：
+
+1. **不准关闭 AstrBot 进程**（用户明确要求）
+2. 没明确说「推送」就不 push
+3. 没明确说升版本就不升
+4. 凭据绝不进仓库
+5. 测试完如实报告（验证了什么 / 没验证什么 / 推翻的假设）
+
+### 改进：shim 进程独立性
+
+`_start_shim` 的 `creationflags` 加上：
+
+```python
+CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB | DETACHED_PROCESS
+```
+
+让 shim 尽量脱离父进程的 Job Object 和进程组。
+若父进程不在任何 Job 里导致 `ERROR_ACCESS_DENIED (0x5)`，
+自动降级到 `CREATE_NO_WINDOW | DETACHED_PROCESS` 并记一条 warning。
+
+> 实测说明：Windows 11 上 `taskkill /T` **不会**跨 Job 边界杀子进程，
+> 带不带 BREAKAWAY 两种都能存活。所以这不是「shim 掉线」的原因，
+> 但让 shim 更独立无害，故保留。
+
+### 修复：移除临时诊断日志
+
+1.7.1 排查期间在看门狗里加的诊断字段（`procs=` / `poll=` / `savedPid=` 等）
+会往日志里塞很长的行，已移除，恢复成一行简洁的 WARN。
+
+### 文档修正
+
+SKILL.md 新增「不准关闭 AstrBot」章节，明确列出禁止的理由和正确做法：
+
+| 改了什么 | 正确做法 |
+|---|---|
+| `shims/*.mjs` | 插件 API `/restart` 只重启那一个 |
+| `pages/*` | 刷新页面 |
+| `main.py` | 插件 API `/reload`；不生效就告诉用户，让用户自己重启 |
+
+---
+
 ## [1.7.1] — 2026-11-13
 
 ### 修复：看门狗每 30 秒把 5 个 shim 全部重启
