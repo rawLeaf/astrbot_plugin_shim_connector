@@ -298,6 +298,8 @@ function importTraeFromDsh(region = "cn") {
   return seen.size;
 }
 
+
+
 // ── 耗费统计 ────────────────────────────────────────────────
 //
 // 累计每个模型的调用次数、token 用量、以及上游返回的成本字段（若有）。
@@ -455,6 +457,57 @@ const MODEL_CATALOG = [
 import { existsSync as _existsSync } from "node:fs";
 import { join as _join } from "node:path";
 import { homedir as _homedir } from "node:os";
+
+
+// ── 父进程守护 ──────────────────────────────────────────────
+//
+// 2026-11-13 用户要求：shim 必须依赖 AstrBot 生存，不能变成孤儿进程。
+//
+// 为什么不在插件的 terminate() 里杀：
+//   AstrBot 有两个场景会调 terminate()：
+//     1. 用户在面板保存配置 → plugin_manager.reload()
+//     2. AstrBot 真的退出
+//   terminate() 分辨不出这两个。如果在里面杀 shim，
+//   用户改一个开关就会导致 5 个 shim 全部重启（很糟的体验）。
+//
+// 所以让 shim 自己监控父进程：
+//   AstrBot 进程还在 → 继续跑（被下次 initialize 复用，零重启）
+//   AstrBot 进程没了 → 主动退出（不留孤儿）
+//
+// 实现：process.kill(pid, 0) 只做权限/存在性检查，不发信号。
+// 连续 MISS_LIMIT 次探测失败才退出，避免瞬时误判。
+const PARENT_PID = Number(process.env.SHIM_PARENT_PID || 0);
+const PARENT_GUARD_MS = Number(process.env.SHIM_PARENT_GUARD_MS || 5000);
+const PARENT_MISS_LIMIT = 2;
+
+if (PARENT_PID > 0) {
+  let missCount = 0;
+  const guardTimer = setInterval(() => {
+    let alive = true;
+    try {
+      process.kill(PARENT_PID, 0);
+    } catch {
+      alive = false;
+    }
+    if (alive) {
+      missCount = 0;
+      return;
+    }
+    missCount += 1;
+    if (missCount >= PARENT_MISS_LIMIT) {
+      console.error(
+        "[shim] 父进程 " + PARENT_PID + " 已退出，" +
+        "shim 随之退出（不留孤儿进程）"
+      );
+      clearInterval(guardTimer);
+      process.exit(0);
+    }
+  }, PARENT_GUARD_MS);
+  guardTimer.unref?.();
+  console.error("[shim] 父进程守护已启用: PID=" + PARENT_PID +
+    " 探测间隔 " + PARENT_GUARD_MS + "ms");
+}
+
 
 /** Trae CN 的 state.vscdb 路径。 */
 function traeVscdbPath() {

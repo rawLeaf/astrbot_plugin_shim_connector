@@ -1160,6 +1160,16 @@ class ShimConnector(Star):
             env["LLM_POOL_RECOVER_STEP"] = str(pp["recover_step"])
             env["LLM_POOL_INITIAL_SCORE"] = str(pp["initial_score"])
 
+        # 父进程守护：shim 会监控这个 PID，AstrBot 死了它跟着退。
+        #
+        # 为什么用 PID 而不是在 terminate() 里杀：
+        #   插件重载（/reload）和 AstrBot 退出都会调 terminate()，
+        #   但前者不该杀 shim（否则改个配置就全部重启），后者该杀。
+        #   terminate() 分辨不出来，但 shim 自己能：
+        #     AstrBot 进程还在 → 继续跑（被复用）
+        #     AstrBot 进程没了 → 退出
+        env["SHIM_PARENT_PID"] = str(os.getpid())
+
         env.setdefault("PYTHONIOENCODING", "utf-8")
         env.setdefault("PYTHONUTF8", "1")
         # vision / llm-pool 需要读 AstrBot 配置来发现上游 provider
@@ -1182,61 +1192,31 @@ class ShimConnector(Star):
         try:
             creation = 0
             if sys.platform == "win32":
-                # CREATE_NO_WINDOW       不弹黑窗
-                # CREATE_BREAKAWAY_FROM_JOB  脱离父进程的 Job Object
-                # CREATE_NEW_PROCESS_GROUP   自己的进程组
+                # 只加 CREATE_NO_WINDOW（不弹黑窗）。
                 #
-                # ⚠️ 2026-11-13 关键：为什么必须 BREAKAWAY
+                # ⚠️ 2026-11-13 两次教训：
                 #
-                # 用户用 停止-AstrBot.bat 停服务，里面是：
-                #     taskkill /PID <astrbot> /T /F
-                # 其中 /T = 终止整棵进程树，**包括所有子进程**。
+                # 第一版：没加任何 flag → shim 是普通子进程。
+                # 第二版：加了 CREATE_BREAKAWAY_FROM_JOB + DETACHED_PROCESS
+                #         → shim 脱离父进程控制，AstrBot 关了它还活着，
+                #           变成「流氓插件」。方向错了，已移除。
                 #
-                # shim 是 AstrBot 用 Popen 起的，天然是子进程，
-                # 所以每次重启 AstrBot，5 个 shim 全部被连带杀掉，
-                # 表现为「shim 不定期消失 + Connection error 集中爆发」。
-                #
-                # CREATE_BREAKAWAY_FROM_JOB 让子进程脱离父进程的 Job，
-                # taskkill /T 就杀不到它了（它不再是「树」的一部分）。
-                # DETACHED_PROCESS 让它独立于父控制台。
-                creation = (
-                    getattr(subprocess, "CREATE_NO_WINDOW", 0)
-                    | getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x01000000)
-                    | getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
-                )
+                # 现在：保持普通子进程关系。
+                # shim 自己的「父进程守护」（见各 shim 的 PARENT_GUARD）
+                # 负责在 AstrBot 真退出时一起退出；
+                # 插件重载时 AstrBot 进程还活着，shim 不受影响 → 被复用。
+                creation = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             # 输出写文件而不是 DEVNULL，这样出问题能回溯
             log_file = open(log_path, "ab", buffering=0)  # noqa: SIM115
             try:
-                try:
-                    proc = subprocess.Popen(
-                        [node, str(script)],
-                        cwd=str(script.parent),
-                        env=env,
-                        stdout=log_file,
-                        stderr=subprocess.STDOUT,
-                        creationflags=creation,
-                    )
-                except OSError as exc:
-                    # CREATE_BREAKAWAY_FROM_JOB 在父进程不属于任何 Job 时
-                    # 会报 ERROR_ACCESS_DENIED (0x5)。降级到只用 NO_WINDOW。
-                    if sys.platform == "win32" and getattr(exc, "winerror", None) == 5:
-                        logger.warning(
-                            f"[shim_connector] {name} 无法脱离父 Job，降级启动"
-                        )
-                        fallback = (
-                            getattr(subprocess, "CREATE_NO_WINDOW", 0)
-                            | getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
-                        )
-                        proc = subprocess.Popen(
-                            [node, str(script)],
-                            cwd=str(script.parent),
-                            env=env,
-                            stdout=log_file,
-                            stderr=subprocess.STDOUT,
-                            creationflags=fallback,
-                        )
-                    else:
-                        raise
+                proc = subprocess.Popen(
+                    [node, str(script)],
+                    cwd=str(script.parent),
+                    env=env,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    creationflags=creation,
+                )
             finally:
                 log_file.close()  # 父进程关句柄，子进程仍持有
             self.procs[name] = proc

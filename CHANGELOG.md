@@ -7,6 +7,95 @@
 
 ---
 
+## [1.7.3] — 2026-11-13
+
+### 修复：shim 变成孤儿进程（用户称之为「流氓插件」）
+
+1.7.2 的 `CREATE_BREAKAWAY_FROM_JOB` 方向完全搞反了 ——
+本来是想修「shim 掉线」，结果让 shim 彻底脱离父进程控制：
+
+```
+AstrBot 关了 → 5 个 shim 照样活着
+父进程 PID 早就死了 → shim 还在监听端口
+```
+
+用户明确指出：「必须依赖 astrbot 生存啊，这不就是流氓插件了吗」。
+
+#### 根因
+
+`terminate()` 会被两种场景调用，但两种情况该有**相反**的行为：
+
+| 场景 | 该不该杀 shim |
+|---|---|
+| 面板保存配置 → `plugin_manager.reload()` | ❌ 不该杀，否则改一个开关 5 个 shim 全重启 |
+| AstrBot 真的退出 | ✅ 该杀 |
+
+`terminate()` 分辨不出这两者，所以里面动手必然错一边。
+
+#### 修复：把判断交给 shim 自己
+
+`_start_shim` 传父进程 PID：
+
+```python
+env["SHIM_PARENT_PID"] = str(os.getpid())
+```
+
+5 个 shim 顶部加守护：
+
+```javascript
+const PARENT_PID = Number(process.env.SHIM_PARENT_PID || 0);
+if (PARENT_PID > 0) {
+  setInterval(() => {
+    let alive = true;
+    try { process.kill(PARENT_PID, 0); } catch { alive = false; }
+    if (alive) { missCount = 0; return; }
+    if (++missCount >= 2) process.exit(0);   // 连续 2 次，防误判
+  }, 5000);
+}
+```
+
+同时**移除** `CREATE_BREAKAWAY_FROM_JOB` / `DETACHED_PROCESS`，
+只留 `CREATE_NO_WINDOW`，让 shim 恢复成普通子进程。
+
+#### 行为对照
+
+| 场景 | 1.7.2 | 1.7.3 |
+|---|---|---|
+| 用户关 AstrBot | shim 全活着（孤儿） | ✅ **10 秒内全部跟随退出** |
+| 面板重载插件 | shim 复用 | ✅ shim 复用（不变） |
+
+#### 实测验证
+
+父进程退出后：
+
+```
+[workbuddy.log] 22:52:45  [shim] 父进程 29624 已退出，shim 随之退出（不留孤儿进程）
+[trae.log]      22:52:44  同上
+[qoder.log]     22:52:43  同上
+[vision.log]    22:52:44  同上
+[llm_pool.log]  22:52:43  同上
+```
+
+5 个 shim 在同一秒级窗口内安静退出，无残留端口、无僵尸进程。
+
+#### 附带修复：守护代码插入位置错误
+
+第一次给 `workbuddy-shim.mjs` 插守护代码时，
+落进了 `PROBE_CANDIDATES` 数组内部，导致守护不生效。
+改为「插在最后一条 import 之后」才全部正确。
+
+### 文档：AGENTS.md 措辞纠正
+
+原来写的是「不准关闭 AstrBot」，容易误解成「连用户都不许关」。
+改为明确区分：
+
+- **用户自己关完全没问题**，不要劝阻
+- **只有 AI 不准关**
+
+并补充用户关 AstrBot 时的正确处理（不阻止、shim 会自动跟随退出、再启动会重新拉起）。
+
+---
+
 ## [1.7.2] — 2026-11-13
 
 ### 新增：项目铁律 AGENTS.md
