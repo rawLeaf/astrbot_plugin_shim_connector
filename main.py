@@ -22,6 +22,7 @@ import shutil
 import subprocess
 import tempfile
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import ClassVar
@@ -45,6 +46,17 @@ SHIM_DIR = PLUGIN_DIR / "shims"
 MAX_LOG_BYTES = 2 * 1024 * 1024
 # /shim logs 单次最多输出多少行
 MAX_LOG_TAIL_LINES = 200
+
+# 看门狗「刚拉起过」的宽限期（秒）。
+#
+# ⚠️ 2026-11-14：vision / llm_pool 启动时要拉模型名册、并行探测上游，
+# 端口可能十几秒才 listen。看门狗 30 秒轮询一次，正好撞上这个窗口，
+# 三道判据同时失效（无句柄 / 无 pid / 端口未开），于是反复 spawn，
+# 与正在启动的实例抢同一个端口 → 表现为「每 30 秒全量重建」。
+#
+# 宽限期要明显大于「最长启动耗时」、又明显小于「真正挂掉后能忍多久」。
+# 90 秒 = 3 个看门狗周期：够 vision/llm_pool 起来，真死了也就多等 90 秒。
+WATCHDOG_SPAWN_GRACE_SEC = 90.0
 
 # 每个 shim 的默认配置。端口与 token 可在 _conf_schema.json 里改。
 #
@@ -193,6 +205,17 @@ class ShimConnector(Star):
         #
         # 这个列表持有所有 Popen，保证生命周期内不被 GC。
         self._proc_keepalive: list = []
+        # 每个 shim 最近一次被「拉起」的 monotonic 时间戳。
+        #
+        # ⚠️ 2026-11-14 看门狗误判循环修复：
+        # vision / llm_pool 启动时要拉模型名册、并行探测上游，端口可能
+        # 十几秒才 listen。这期间三个判据全不成立：
+        #   - self.procs 无句柄（刚 spawn，或插件重载后为空）
+        #   - saved_pids 还没写（状态文件是 terminate() 时才落盘）
+        #   - 端口还没开
+        # 看门狗于是判定「未运行」→ 再拉一次 → 与正在启动的实例互相踩。
+        # 这个时间戳给「刚起过的」留一个启动宽限期，宽限期内一律跳过。
+        self._last_spawn: dict[str, float] = {}
         # 记录「上次生效」的启用状态，用于差分
         self._applied: dict[str, bool] = {}
 
@@ -663,7 +686,14 @@ class ShimConnector(Star):
                 continue
 
             # 情况 D：配置里启用，但没在跑 → 启动
-            ok = await self._start_shim(name, node, reuse_ok=False)
+            #
+            # ⚠️ 2026-11-14：这里不能用 reuse_ok=False。
+            # 上面的 running 判定靠端口探测，而 vision / llm_pool 启动要
+            # 十几秒才 listen；插件重载时正好撞上这个窗口 → running 为 False
+            # → 硬起新进程 → 与正在启动的那个抢端口 → 反复循环。
+            # reuse_ok=True 让「端口已被占」被视为「已在运行」，
+            # 正是重载复用场景想要的语义。
+            ok = await self._start_shim(name, node, reuse_ok=True)
             if ok:
                 started.append(name)
 
@@ -800,12 +830,45 @@ class ShimConnector(Star):
                         )
                         continue
 
-                    # ── 三道都不满足，才拉起 ──
-                    logger.warning(
-                        f"[shim_connector] 看门狗发现 {name} (:{port}) 未运行，自动拉起"
-                    )
+                    # ── 判据 4（启动宽限期）：刚拉起过的不再重复拉 ──
+                    #
+                    # ⚠️ 2026-11-14 修复「看门狗每 30 秒全量重建」：
+                    #
+                    # 上面的三道判据在「进程正在启动、端口还没开」这个窗口里
+                    # 会同时失效（vision / llm_pool 要拉名册、探测上游，
+                    # 端口可能十几秒才 listen）。此时看门狗判定「未运行」，
+                    # 再 spawn 一个 —— 与正在启动的那个抢同一个端口，
+                    # 谁先绑上谁活，另一个失败退出，日志里就是无限循环。
+                    #
+                    # 30 秒的轮询间隔天然会撞上这个窗口，所以必须靠时间戳
+                    # 把「我刚起过它」这件事记住，宽限期内一律跳过。
+                    last = self._last_spawn.get(name, 0.0)
+                    if last and (time.monotonic() - last) < WATCHDOG_SPAWN_GRACE_SEC:
+                        logger.debug(
+                            f"[shim_connector] {name} (:{port}) "
+                            f"{time.monotonic() - last:.0f}s 前刚拉起，等待其 listen，跳过"
+                        )
+                        continue
+
+                    # ── 四道都不满足，才拉起 ──
                     async with self._lock:
-                        await self._start_shim(name, node, reuse_ok=False)
+                        # 抢到锁后再查一次：并发的 initialize / WebUI 手动启动
+                        # 可能已经在这几行之间把它拉起来了。
+                        # timeout 用 2.0s —— Windows 上到 127.0.0.1 的握手要
+                        # 0.6~1.0s，默认短超时会把「在听」误判成「空闲」。
+                        if not await port_free_async(port, timeout=2.0):
+                            logger.debug(
+                                f"[shim_connector] {name} (:{port}) 端口已在听，跳过"
+                            )
+                            self._last_spawn.pop(name, None)
+                            continue
+                        logger.warning(
+                            f"[shim_connector] 看门狗发现 {name} (:{port}) 未运行，自动拉起"
+                        )
+                        self._last_spawn[name] = time.monotonic()
+                        # reuse_ok=True：万一 spawn 时端口又被别人抢先绑上，
+                        # 视为「已在运行」而不是报错刷屏。
+                        await self._start_shim(name, node, reuse_ok=True)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
@@ -1222,6 +1285,9 @@ class ShimConnector(Star):
             self.procs[name] = proc
             # 钉住引用，防止 Popen 被 GC 导致 Windows 杀掉子进程
             self._proc_keepalive.append(proc)
+            # 记录本次拉起时刻：看门狗据此给出启动宽限期，
+            # 避免在「端口还没 listen」的窗口里重复 spawn（2026-11-14）。
+            self._last_spawn[name] = time.monotonic()
             logger.info(
                 f"[shim_connector] 已启动 {name} (:{port}) pid={proc.pid} "
                 f"log={log_path.name}"
@@ -1497,14 +1563,45 @@ class ShimConnector(Star):
     async def _check_started(
         self, name: str, proc: subprocess.Popen, log_path: Path
     ) -> None:
-        """启动后 2.5 秒检查是否秒退，把日志尾部打进插件日志。"""
+        """启动后 2.5 秒检查是否秒退，把日志尾部打进插件日志。
+
+        之后转入**长驻监控**：进程真正的退出时刻、退出码、日志尾部
+        都写进插件日志（2026-11-14）。
+
+        为什么需要长驻监控：以前只在 2.5 秒这一个点查一次，之后进程
+        无论何时死、怎么死，插件日志里都没有任何记录 —— 只剩
+        「看门狗发现 xxx 未运行，自动拉起」这一句结果，看不到原因。
+        现在 shim 那边也会打印 LISTEN FAILED / 收到 SIGxxx / ⏹ 退出，
+        两边一对，就能定位到是端口冲突、被外部杀、还是自己崩。
+        """
         await asyncio.sleep(2.5)
-        if proc.poll() is None:
+        if proc.poll() is not None:
+            tail = self._tail(log_path, 15)
+            logger.error(
+                f"[shim_connector] {name} 启动后立即退出 (code={proc.returncode})\n{tail}"
+            )
             return
-        tail = self._tail(log_path, 15)
-        logger.error(
-            f"[shim_connector] {name} 启动后立即退出 (code={proc.returncode})\n{tail}"
-        )
+
+        # ── 长驻监控：每 5 秒看一次，直到进程退出或插件卸载 ──
+        #
+        # 只读 proc.poll()（内存操作），不碰磁盘，开销可忽略。
+        # 退出时读一次日志尾部（最多 64KB），只在真死那一刻发生。
+        try:
+            while True:
+                await asyncio.sleep(5.0)
+                code = proc.poll()
+                if code is None:
+                    continue
+                tail = self._tail(log_path, 20)
+                logger.error(
+                    f"[shim_connector] {name} 已退出 (code={code}, pid={proc.pid})"
+                    f" —— 日志尾部：\n{tail}"
+                )
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[shim_connector] {name} 退出监控异常: {exc}")
 
     @staticmethod
     def _tail(path: Path, lines: int) -> str:

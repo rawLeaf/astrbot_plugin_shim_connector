@@ -1306,11 +1306,68 @@ const server = createServer((req, res) => {
   sendError(res, 404, "no such route: " + req.method + " " + url, "not_found");
 });
 
-process.on("uncaughtException", (e) => console.error("[qoder-shim] uncaught: " + (e?.stack ?? e)));
-process.on("unhandledRejection", (e) => console.error("[qoder-shim] unhandled: " + (e?.stack ?? e)));
+process.on("uncaughtException", (e) => {
+  console.error("[qoder-shim] 💥 uncaught pid=" + process.pid + ": " + (e?.stack ?? e));
+  process.exit(1);
+});
+process.on("unhandledRejection", (e) => {
+  console.error("[qoder-shim] 💥 unhandled rejection pid=" + process.pid + ": " + (e?.stack ?? e));
+});
+
+/*
+ * ⚠️ 2026-11-14：listen 失败必须说清楚，否则只会留下一句
+ * "uncaughtException: listen EADDRINUSE"，看不出是端口被谁占、
+ * 还是自己起了第二份。看门狗反复重启时，这条日志是唯一的定点证据。
+ */
+server.on("error", (e) => {
+  const code = e && e.code ? String(e.code) : "UNKNOWN";
+  const hint =
+    code === "EADDRINUSE"
+      ? "端口已被占用（多半是同一个 shim 的另一份实例还在跑，或别的程序占了 " + PORT + "）"
+      : code === "EACCES"
+        ? "权限不足，无法绑定 " + PORT
+        : code === "EADDRNOTAVAIL"
+          ? "地址不可用，HOST=" + HOST + " 不属于本机"
+          : "监听失败";
+  console.error(
+    "[qoder-shim] ❌ LISTEN FAILED code=" + code +
+    " addr=" + HOST + ":" + PORT +
+    " pid=" + process.pid +
+    " ppid=" + process.ppid +
+    " :: " + hint
+  );
+  process.exit(code === "EADDRINUSE" ? 3 : 4);
+});
 
 server.listen(PORT, HOST, () => {
-  console.log("[qoder-shim] listening on http://" + HOST + ":" + PORT + "/v1");
+  console.log(
+    "[qoder-shim] listening on http://" + HOST + ":" + PORT + "/v1" +
+    " pid=" + process.pid + " ppid=" + process.ppid
+  );
+});
+
+/*
+ * 退出/信号全记录。子进程被谁杀、收到什么信号、退出码多少，
+ * 都写进 stdout（父进程会把它重定向到 <name>.log，可回溯）。
+ */
+for (const sig of ["SIGINT", "SIGTERM", "SIGBREAK", "SIGHUP"]) {
+  try {
+    process.on(sig, () => {
+      console.error("[qoder-shim] ⚠️ 收到 " + sig + " pid=" + process.pid + "，即将退出");
+      process.exit(128 + (sig === "SIGINT" ? 2 : sig === "SIGTERM" ? 15 : sig === "SIGHUP" ? 1 : 21));
+    });
+  } catch {
+    /* 该平台不支持这个信号 */
+  }
+}
+
+process.on("exit", (code) => {
+  // 注意：exit 回调里只能做同步操作
+  console.error("[qoder-shim] ⏹ 退出 code=" + code + " pid=" + process.pid);
+});
+
+process.on("beforeExit", (code) => {
+  console.error("[qoder-shim] ⏸ 事件循环空了 code=" + code + " pid=" + process.pid);
 });
 
 /*
