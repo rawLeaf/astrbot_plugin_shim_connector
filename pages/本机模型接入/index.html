@@ -249,8 +249,11 @@
     <div class="modal-box wide">
       <h3>检测本地账号</h3>
       <p class="hint">
-        自动扫描本机上已有的 WorkBuddy 账号，找到后一键导入。<br />
-        <strong>如果你之前用 dsh-connect-workbuddy 加过账号，这里能直接找到。</strong>
+        自动扫描本机上已有的账号，找到后一键导入。<br />
+        <strong>支持 WorkBuddy / Trae / Qoder，会扫客户端登录态和历史 vault。</strong><br />
+        <span style="color:var(--dim);font-size:12px">
+          扫的是当前标签页选的那个客户端（上方 WorkBuddy / Trae / Qoder 切换）。
+        </span>
       </p>
 
       <div class="scan-status" id="scanStatus">扫描中…</div>
@@ -259,8 +262,9 @@
       <details class="manual">
         <summary>自动扫描没找到？手动指定文件夹</summary>
         <div class="manual-explain">
-          <p><strong>找什么：</strong>一个叫 <code>workbuddy-vault</code>（或类似名字）的文件夹，
-          里面要有 <code>cn</code> 或 <code>global</code> 子文件夹。</p>
+          <p><strong>找什么：</strong>WorkBuddy 是 <code>workbuddy-vault</code> 文件夹（含
+          <code>cn</code> / <code>global</code> 子目录）；Trae 是 <code>.trae-auth.cn.json</code>；
+          Qoder 是 <code>com.qodercn.app.stable\auth.v1.dat</code>。</p>
           <p><strong>长得像这样：</strong></p>
           <pre class="tree">你的文件夹/
 ├── cn/

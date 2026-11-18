@@ -1116,7 +1116,34 @@ const server = createServer((req, res) => {
         });
       } catch { /* 该区没登录 */ }
     }
-    sendJson(res, 200, { ok: true, found });
+    // 统一成和 workbuddy 一样的 candidates 格式，前端才能渲染。
+    // （2026-11-18：之前只返回 found[]，前端只认 candidates[]，
+    //   导致 Qoder 扫描完弹窗一片空白。）
+    const candidates = [];
+    for (const x of found) {
+      candidates.push({
+        path: String(x.from || "").replace(/^desktop:/, "Qoder 桌面端 "),
+        why: "Qoder 桌面端当前登录（" + x.region + "）",
+        exists: true,
+        accountCount: 1,
+        regions: { [x.region]: 1 },
+        kind: "desktop",
+        accounts: [x.accountId],
+      });
+    }
+    if (candidates.length === 0) {
+      const roaming = process.env.APPDATA || join(homedir(), "AppData", "Roaming");
+      for (const rid of ["qoder-cn", "qoder"]) {
+        const r = REGIONS[rid];
+        candidates.push({
+          path: (r && r.dir) || join(roaming, rid === "qoder-cn"
+            ? "com.qodercn.app.stable" : "com.qoder.app.stable"),
+          why: "Qoder 桌面端凭据目录（未检测到登录）",
+          exists: false, accountCount: 0, regions: {}, kind: "desktop",
+        });
+      }
+    }
+    sendJson(res, 200, { ok: true, found, candidates });
     return;
   }
 

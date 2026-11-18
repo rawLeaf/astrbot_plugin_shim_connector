@@ -1296,7 +1296,43 @@ const server = createServer((req, res) => {
       const inVault = new Set(traeVaultFiles("cn").map((x) => x.accountId));
       for (const x of found) x.inVault = inVault.has(x.accountId);
 
-      sendJson(res, 200, { ok: true, found, vaultCount: inVault.size });
+      // 统一成和 workbuddy 一样的 candidates 格式，前端才能渲染。
+      // （2026-11-18：之前只返回 found[]，前端只认 candidates[]，
+      //   导致 Trae 扫描完弹窗一片空白。）
+      const byFrom = new Map();
+      for (const x of found) {
+        const src = String(x.from || "unknown");
+        const key = src.startsWith("desktop") ? "Trae 桌面端当前登录" : src;
+        if (!byFrom.has(key)) byFrom.set(key, { path: key, why: key, count: 0, ids: [] });
+        const g = byFrom.get(key);
+        g.count += 1;
+        g.ids.push(x.accountId);
+      }
+      const candidates = [...byFrom.values()].map((g) => ({
+        path: g.path,
+        why: g.why,
+        exists: true,
+        accountCount: g.count,
+        regions: { cn: g.count },
+        kind: "desktop",
+        accounts: g.ids,
+      }));
+      // 一个都没找到时，列出「找过哪些地方」便于排查
+      if (candidates.length === 0) {
+        const dshHome = process.env.DSH_HOME || join(homedir(), ".dsh");
+        candidates.push({
+          path: join(dshHome, ".trae-auth.cn.json"),
+          why: "dsh-home 的 trae 凭据（未找到）",
+          exists: false, accountCount: 0, regions: {}, kind: "file",
+        });
+        candidates.push({
+          path: "Trae 桌面端 storage.json",
+          why: "桌面端当前登录（未检测到）",
+          exists: false, accountCount: 0, regions: {}, kind: "desktop",
+        });
+      }
+
+      sendJson(res, 200, { ok: true, found, candidates, vaultCount: inVault.size });
     })().catch((e) => { if (!res.headersSent) sendError(res, 500, String(e), "internal"); });
     return;
   }

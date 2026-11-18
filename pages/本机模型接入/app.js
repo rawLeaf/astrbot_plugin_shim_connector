@@ -390,7 +390,7 @@ function renderAccounts() {
     if (state.accountShim === "trae") {
       list.innerHTML = '<div class="empty">'
         + 'Trae 账号池还是空的。'
-        + '<br>点右上角「检测本地账号」，会自动扫 dsh-home 的 .trae-auth.cn.json。</div>';
+        + '<br>点右上角「检测本地账号」，会扫 dsh-home 的 .trae-auth.cn.json 和 Trae 桌面端登录态。</div>';
     } else {
       list.innerHTML = '<div class="empty">'
         + (region === "global" ? "国际版还没有账号。" : "国内版还没有账号。")
@@ -554,9 +554,12 @@ function renderScanList(candidates) {
   const existsEmpty = candidates.filter(c => c.exists && c.accountCount === 0);
   const missing = candidates.filter(c => !c.exists);
 
+  const totalAcc = found.reduce((s, c) => s + c.accountCount, 0);
   q("#scanStatus").innerHTML = found.length > 0
-    ? `<span style="color:var(--ok)">✓ 找到 ${found.length} 个位置，共 ${found.reduce((s,c)=>s+c.accountCount,0)} 个账号</span>`
-    : '<span style="color:var(--warn)">自动扫描没有找到账号。展开下面的「手动指定文件夹」看看怎么找。</span>';
+    ? `<span style="color:var(--ok)">✓ 找到 ${found.length} 个位置，共 ${totalAcc} 个账号</span>`
+    : '<span style="color:var(--warn)">自动扫描没有找到账号。'
+      + '先确认对应客户端（WorkBuddy / Trae / Qoder）已登录，'
+      + '再展开下面的「手动指定文件夹」看看怎么找。</span>';
 
   const parts = [];
 

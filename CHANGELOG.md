@@ -7,6 +7,178 @@
 
 ---
 
+## [1.7.6] — 2026-11-18
+
+### 修复：Trae / Qoder 的「检测本地账号」扫完一片空白
+
+用户要求「trae qoder 的桌面端也搞进去」。
+
+#### 根因
+
+三个 shim 的 `/accounts/scan` 返回格式不统一：
+
+| shim | 返回 | 前端能否渲染 |
+|---|---|---|
+| workbuddy | `candidates[]` | ✅ |
+| trae | `found[]` | ❌ |
+| qoder | `found[]` | ❌ |
+
+前端 `openScanModal` 只读 `r.candidates`，所以 Trae / Qoder
+扫完弹窗是空的 —— 其实扫描本身有结果，只是格式对不上。
+
+#### 修复
+
+**1. 三个 shim 统一返回 `candidates[]`**
+
+Trae / Qoder 在返回 `found[]` 的同时也构造 `candidates[]`：
+
+```javascript
+{ path, why, exists, accountCount, regions, kind, accounts }
+```
+
+一个都没找到时也会列出「找过哪些地方」，方便排查。
+
+**2. Python 侧兼容老格式**
+
+`_api_accounts_scan` 转发时若 `candidates` 为空，自动把
+`found[]` 转成 `candidates`，兼容旧版 shim。
+
+**3. 本地扫描补上 Trae / Qoder 桌面端**
+
+`_scan_vault_candidates_local` 扩展：
+
+| shim | 新增扫描目标 |
+|---|---|
+| trae | `%APPDATA%\Trae CN\User\globalStorage\storage.json`（看 `iCubeAuthInfo` 字段） |
+| qoder | `%APPDATA%\com.qodercn.app.stable\`（含 `auth.v1.dat` 才算已登录） |
+
+#### 文案：不再只说 WorkBuddy
+
+扫描弹窗原来写：
+
+> 自动扫描本机上已有的 **WorkBuddy** 账号…
+> 如果你之前用 **dsh-connect-workbuddy** 加过账号…
+
+改成：
+
+> 自动扫描本机上已有的账号…
+> **支持 WorkBuddy / Trae / Qoder**，会扫客户端登录态和历史 vault。
+> 扫的是当前标签页选的那个客户端（上方 WorkBuddy / Trae / Qoder 切换）。
+
+手动指定说明也改成三种格式都列出：
+
+- WorkBuddy：`workbuddy-vault` 文件夹（含 `cn` / `global`）
+- Trae：`.trae-auth.cn.json`
+- Qoder：`com.qodercn.app.stable\auth.v1.dat`
+
+扫描失败提示也补了「先确认对应客户端已登录」。
+
+#### 实测
+
+```
+workbuddy  候选 9  可导入 3 个位置
+  ✅ vault    6 个  环境变量 DSH_HOME
+  ✅ vault    1 个  默认位置 ~/.dsh/workbuddy-vault
+  ✅ desktop  2 个  WorkBuddy 桌面端凭据目录
+
+trae       候选 1  可导入 1 个位置
+  ✅ desktop  2 个  D:\dev\dsh-home\.trae-auth.cn.json
+
+qoder      候选 2  可导入 2 个位置
+  ✅ desktop  1 个  Qoder 桌面端当前登录（qoder-cn）
+  ✅ desktop  1 个  Qoder 桌面端当前登录（qoder）
+```
+
+---
+
+## [1.7.5] — 2026-11-18
+
+### 修复：新电脑「检测本地账号」报「未在运行（端口 8787 空闲）」
+
+用户在新电脑上装了 WorkBuddy 桌面端并已登录，点「检测本地账号」却失败。
+
+#### 根因一：扫描候选漏了桌面端凭据目录
+
+`dshVaultCandidates()` 只扫 dsh vault：
+
+```
+~/.dsh/workbuddy-vault
+~/dev/dsh-home/workbuddy-vault
+<盘符>/dev/dsh-home/workbuddy-vault
+```
+
+**但新电脑通常没装 dsh-connect-workbuddy，只有 WorkBuddy 桌面端登录态**，
+凭据在：
+
+```
+%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\workbuddy-desktop.info
+```
+
+这个路径完全没在候选列表里，所以扫不到。
+
+**修复**：候选列表加入桌面端 auth 目录，并新增 `kind: "desktop"`
+识别（桌面端目录结构是散放的 `.info` 文件，不是 `cn/` 子目录）。
+
+#### 根因二：扫描接口强制依赖 shim 存活
+
+`_api_accounts_scan` 无条件走 `_proxy_shim(shim, "/accounts/scan")`，
+shim 没启动就整个失败 —— 前端只看到「未在运行（端口 8787 空闲）」。
+
+但**扫描本身只是读文件系统**，不该要求 shim 活着。
+尤其新电脑第一次用，shim 可能还没起来。
+
+**修复**：改为「shim 在跑就转发，不在跑就插件自己扫」。
+
+新增 `_scan_vault_candidates_local(shim)`（Python 实现，与 shim 侧
+`scanVaultLocations` 同样的候选顺序），覆盖三个 shim：
+
+| shim | 扫描目标 |
+|---|---|
+| workbuddy | dsh vault + **桌面端 auth 目录** + 盘符遍历 |
+| trae | `.trae-auth.cn.json` |
+| qoder | `com.qodercn.app.stable/auth.v1.dat` 等 |
+
+返回值新增 `scannedBy: "plugin"`，前端 hint 明确说明「shim 未运行，
+已由插件直接扫描文件系统」。
+
+#### 附带：错误文案加操作指引
+
+原来只有：
+
+```
+workbuddy 未在运行（端口 8787 空闲）
+```
+
+现在：
+
+```
+workbuddy 未在运行（端口 8787 空闲）。
+到「扩展功能 → 本机模型接入」点该 shim 的启动，或用 /shim start 指令拉起。
+```
+
+#### 实测
+
+shim 运行时扫描（9 个候选）：
+
+```
+✅ vault    6 个  环境变量 DSH_HOME
+✅ vault    1 个  默认位置 ~/.dsh/workbuddy-vault
+✅ desktop  2 个  WorkBuddy 桌面端凭据目录   ← 新增
+```
+
+shim 停止后扫描：
+
+```
+ok: true
+scannedBy: plugin   ← 本地扫描
+候选: 9
+桌面端: ✅ 2 个
+```
+
+导入桌面端凭据：`153****6251` 有效期从 2026-12-08 更新到 2026-12-16。
+
+---
+
 ## [1.7.4] — 2026-11-14
 
 ### 修复：看门狗每 30 秒全量重建 shim（自我踩踏循环）

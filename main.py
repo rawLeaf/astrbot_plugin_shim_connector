@@ -2319,7 +2319,11 @@ class ShimConnector(Star):
         self._require_name(name)
         port = self._port(name)
         if await port_free_async(port):
-            raise RuntimeError(f"{name} 未在运行（端口 {port} 空闲）")
+            raise RuntimeError(
+                f"{name} 未在运行（端口 {port} 空闲）。"
+                f"到「扩展功能 → 本机模型接入」点该 shim 的启动，"
+                f"或用 /shim start 指令拉起。"
+            )
 
         url = f"http://127.0.0.1:{port}{path}"
         token = self._token(name)
@@ -2353,7 +2357,11 @@ class ShimConnector(Star):
         self._require_name(name)
         port = self._port(name)
         if await port_free_async(port):
-            raise RuntimeError(f"{name} 未在运行（端口 {port} 空闲）")
+            raise RuntimeError(
+                f"{name} 未在运行（端口 {port} 空闲）。"
+                f"到「扩展功能 → 本机模型接入」点该 shim 的启动，"
+                f"或用 /shim start 指令拉起。"
+            )
 
         url = f"http://127.0.0.1:{port}{path}"
         token = self._token(name)
@@ -2883,23 +2891,248 @@ class ShimConnector(Star):
     # ── 账号管理（转发到 workbuddy shim）──────────────────────
 
     async def _api_accounts_scan(self):
-        """扫描 vault 候选位置，返回「找过哪些地方」。"""
+        """扫描 vault 候选位置，返回「找过哪些地方」。
+
+        ⚠️ 2026-11-13 修复：这个接口原来强制走 _proxy_shim，
+        shim 没启动就整个失败，前端只看到「未在运行（端口 8787 空闲）」。
+        但扫描本身**只是文件系统操作**，不该依赖 shim 存活 ——
+        尤其新电脑第一次用，shim 可能还没起来。
+
+        现在：shim 在跑就转发（拿到它算的 regions 明细），
+        不在跑就由插件自己扫（同样的候选逻辑，Python 侧实现）。
+        """
 
         async def handler():
             shim = self._account_shim()
-            data = await self._proxy_shim(shim, "/accounts/scan")
-            cands = data.get("candidates") or []
-            found = [c for c in cands if c.get("exists") and c.get("accountCount", 0) > 0]
+            port = self._port(shim)
+
+            # 先试 shim；失败则本地扫描
+            if not await port_free_async(port):
+                try:
+                    data = await self._proxy_shim(shim, "/accounts/scan")
+                    cands = data.get("candidates") or []
+                    # 兜底：老版本 shim 只返回 found[]，转成 candidates 格式
+                    if not cands:
+                        for x in (data.get("found") or []):
+                            cands.append({
+                                "path": str(x.get("from") or x.get("region") or "?"),
+                                "why": "扫描结果",
+                                "exists": True,
+                                "accountCount": 1,
+                                "regions": {str(x.get("region") or "cn"): 1},
+                                "kind": "desktop",
+                            })
+                    found = [
+                        c for c in cands
+                        if c.get("exists") and c.get("accountCount", 0) > 0
+                    ]
+                    logger.info(
+                        f"[shim_connector] 扫描 vault（经 {shim}）："
+                        f"{len(cands)} 个候选，{len(found)} 个有账号"
+                    )
+                    return {"ok": True, "shim": shim, "scannedBy": shim, **data}
+                except (ValueError, RuntimeError) as exc:
+                    logger.warning(
+                        f"[shim_connector] {shim} 扫描失败，改本地扫描: {exc}"
+                    )
+
+            # 本地扫描（不依赖 shim）
+            cands = self._scan_vault_candidates_local(shim)
+            found = [
+                c for c in cands
+                if c.get("exists") and c.get("accountCount", 0) > 0
+            ]
             logger.info(
-                f"[shim_connector] 扫描 vault：{len(cands)} 个候选，"
-                f"{len(found)} 个有账号"
+                f"[shim_connector] 扫描 vault（本地）："
+                f"{len(cands)} 个候选，{len(found)} 个有账号"
             )
-            return {"ok": True, "shim": shim, **data}
+            return {
+                "ok": True,
+                "shim": shim,
+                "scannedBy": "plugin",
+                "candidates": cands,
+                "hint": (
+                    f"{shim} 未运行，已由插件直接扫描文件系统。"
+                    "找到账号后可直接导入。"
+                ),
+            }
 
         try:
             return await self._api_response(await handler())
         except (ValueError, RuntimeError) as exc:
             return await self._api_response({"ok": False, "message": str(exc)}, 400)
+
+    def _scan_vault_candidates_local(self, shim: str) -> list[dict]:
+        """不依赖 shim 的本地扫描（纯文件系统）。
+
+        与 shims/*.mjs 里的 scanVaultLocations 保持同样的候选顺序，
+        但用 Python 实现，保证 shim 没启动时也能「检测本地账号」。
+
+        2026-11-13 起因：用户在新电脑上装了 WorkBuddy 桌面端并登录，
+        点「检测本地账号」却报「未在运行（端口 8787 空闲）」——
+        扫描本来只是看文件，不该要求 shim 活着。
+
+        Args:
+            shim: workbuddy | trae | qoder，决定候选路径集。
+
+        Returns:
+            候选列表，每项含 path / why / exists / accountCount / regions / kind。
+        """
+        home = Path.home()
+        cands: list[tuple[Path, str, str]] = []
+        seen: set[str] = set()
+
+        def push(p: Path | None, why: str, kind: str = "vault") -> None:
+            if p is None:
+                return
+            key = str(p).lower().rstrip("\\/")
+            if key in seen:
+                return
+            seen.add(key)
+            cands.append((p, why, kind))
+
+        env = os.environ
+
+        if shim == "workbuddy":
+            # 1) 环境变量
+            if env.get("WB_DSH_VAULT"):
+                push(Path(env["WB_DSH_VAULT"]), "环境变量 WB_DSH_VAULT")
+            dsh_home = (env.get("DSH_HOME") or "").strip()
+            if dsh_home:
+                push(Path(dsh_home) / "workbuddy-vault", "环境变量 DSH_HOME")
+                push(Path(dsh_home) / "vault", "环境变量 DSH_HOME（备选名）")
+            # 2) 默认位置
+            push(home / ".dsh" / "workbuddy-vault", "默认位置 ~/.dsh/workbuddy-vault")
+            push(home / "dev" / "dsh-home" / "workbuddy-vault", "~/dev/dsh-home 下的 vault")
+            push(home / "dsh-home" / "workbuddy-vault", "~/dsh-home 下的 vault")
+            # 3) 桌面端凭据（新电脑最可能只有这个）
+            local_app = env.get("LOCALAPPDATA") or str(home / "AppData" / "Local")
+            push(
+                Path(local_app) / "CodeBuddyExtension" / "Data" / "Public" / "auth",
+                "WorkBuddy 桌面端凭据目录",
+                "desktop",
+            )
+            # 4) 盘符遍历
+            if sys.platform == "win32":
+                for letter in "CDEFGHIJ":
+                    d = Path(letter + ":\\")
+                    if d.is_dir():
+                        push(d / "dev" / "dsh-home" / "workbuddy-vault",
+                             f"{letter} 盘的 dev/dsh-home")
+                        push(d / "dsh-home" / "workbuddy-vault",
+                             f"{letter} 盘的 dsh-home")
+
+        elif shim == "trae":
+            if env.get("TRAE_VAULT_DIR"):
+                push(Path(env["TRAE_VAULT_DIR"]), "环境变量 TRAE_VAULT_DIR")
+            dsh_home = (env.get("DSH_HOME") or "").strip()
+            if dsh_home:
+                push(Path(dsh_home) / ".trae-auth.cn.json", "环境变量 DSH_HOME", "trae")
+            push(home / ".dsh" / ".trae-auth.cn.json", "~/.dsh 下的 trae 凭据", "trae")
+            push(home / "dev" / "dsh-home" / ".trae-auth.cn.json",
+                 "~/dev/dsh-home 下的 trae 凭据", "trae")
+            # Trae 桌面端：storage.json（iCubeAuthInfo 加密字段）
+            roaming = env.get("APPDATA") or str(home / "AppData" / "Roaming")
+            for app in ("Trae CN", "Trae"):
+                push(
+                    Path(roaming) / app / "User" / "globalStorage" / "storage.json",
+                    f"Trae 桌面端 {app}（当前登录）",
+                    "trae-desktop",
+                )
+            if sys.platform == "win32":
+                for letter in "CDEFGHIJ":
+                    d = Path(letter + ":\\")
+                    if d.is_dir():
+                        push(d / "dev" / "dsh-home" / ".trae-auth.cn.json",
+                             f"{letter} 盘 dev/dsh-home 的 trae 凭据", "trae")
+
+        elif shim == "qoder":
+            roaming = env.get("APPDATA") or str(home / "AppData" / "Roaming")
+            for app_id in ("com.qodercn.app.stable", "com.qoder.app.stable"):
+                # 整个应用目录（含 auth.v1.dat + auth.machine-id），
+                # 单看 .dat 判断不出「已登录」，目录存在才算候选
+                push(Path(roaming) / app_id, f"Qoder 桌面端 {app_id}", "qoder")
+
+        out: list[dict] = []
+        for p, why, kind in cands:
+            item: dict = {
+                "path": str(p),
+                "why": why,
+                "exists": False,
+                "accountCount": 0,
+                "regions": {},
+                "kind": kind,
+            }
+            try:
+                if kind == "trae":
+                    # dsh 的 .trae-auth.cn.json：{ credentials: {...} }
+                    if p.is_file():
+                        item["exists"] = True
+                        try:
+                            doc = json.loads(p.read_text(encoding="utf-8"))
+                            creds = doc.get("credentials") or {}
+                            n = len(creds) if isinstance(creds, (dict, list)) else 0
+                        except Exception:  # noqa: BLE001
+                            n = 1
+                        item["accountCount"] = n
+                        item["regions"] = {"cn": n}
+                elif kind == "trae-desktop":
+                    # 桌面端 storage.json：看有没有 iCubeAuthInfo 字段
+                    if p.is_file():
+                        item["exists"] = True
+                        try:
+                            raw = p.read_text(encoding="utf-8", errors="ignore")
+                            has = "iCubeAuthInfo" in raw
+                        except Exception:  # noqa: BLE001
+                            has = False
+                        item["accountCount"] = 1 if has else 0
+                        item["regions"] = {"cn": 1} if has else {}
+                elif kind == "qoder":
+                    # 应用目录：auth.v1.dat + auth.machine-id 都在才算已登录
+                    if p.is_dir():
+                        item["exists"] = True
+                        dat = p / "auth.v1.dat"
+                        if dat.is_file():
+                            item["accountCount"] = 1
+                            region = "qoder-cn" if "qodercn" in p.name else "qoder"
+                            item["regions"] = {region: 1}
+                elif kind == "file":
+                    if p.is_file():
+                        item["exists"] = True
+                        item["accountCount"] = 1
+                        item["regions"] = {"file": 1}
+                elif p.is_dir():
+                    item["exists"] = True
+                    if kind == "desktop":
+                        infos = [
+                            f.name for f in p.iterdir()
+                            if f.is_file()
+                            and f.name.startswith("workbuddy-desktop")
+                            and f.name.endswith(".info")
+                            and ".observation." not in f.name
+                        ]
+                        if infos:
+                            item["regions"] = {"desktop": len(infos)}
+                            item["accountCount"] = len(infos)
+                    else:
+                        for region in ("cn", "global"):
+                            rd = p / region
+                            if not rd.is_dir():
+                                continue
+                            try:
+                                n = len([
+                                    f for f in rd.iterdir()
+                                    if f.is_file() and f.name.endswith(".json")
+                                ])
+                            except OSError:
+                                continue
+                            if n > 0:
+                                item["regions"][region] = n
+                                item["accountCount"] += n
+            except OSError:
+                pass
+            out.append(item)
+        return out
 
     def _account_shim(self, body: dict | None = None) -> str:
         """账号池操作的目标 shim。默认 workbuddy。

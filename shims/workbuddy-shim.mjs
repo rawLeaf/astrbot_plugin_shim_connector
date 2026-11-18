@@ -809,6 +809,18 @@ function dshVaultCandidates() {
   push(join(h, "dev", "dsh-home", "workbuddy-vault"), "~/dev/dsh-home 下的 vault");
   push(join(h, "dsh-home", "workbuddy-vault"), "~/dsh-home 下的 vault");
 
+  // 3.5) WorkBuddy 桌面端 auth 目录（**新电脑最可能只有这个**）
+  //
+  // 2026-11-13 用户反馈：另一台电脑装了 WorkBuddy 桌面端并已登录，
+  // 但「检测本地账号」报「未在运行」/ 找不到。
+  // 原因：候选列表只扫 dsh vault，没扫桌面端凭据目录。
+  // 新电脑通常没装 dsh-connect-workbuddy，只有桌面端登录态。
+  const localApp = process.env.LOCALAPPDATA || join(h, "AppData", "Local");
+  push(
+    join(localApp, "CodeBuddyExtension", "Data", "Public", "auth"),
+    "WorkBuddy 桌面端凭据目录",
+  );
+
   // 4) Windows：遍历已有盘符，探测 <盘>/dev/dsh-home 与 <盘>/dsh-home
   //    只作为候选列出，不假设一定存在
   if (process.platform === "win32") {
@@ -847,18 +859,33 @@ function scanVaultLocations() {
     let exists = false;
     let accountCount = 0;
     let regions = {};
+    let kind = "vault";   // vault | desktop
     try {
       exists = existsSync(x.path);
       if (exists) {
-        for (const region of ["cn", "global"]) {
-          const rd = join(x.path, region);
-          if (!existsSync(rd)) continue;
-          let files = [];
-          try { files = readdirSync(rd); } catch { continue; }
-          const n = files.filter((f) => /\.json$/.test(f)).length;
-          if (n > 0) {
-            regions[region] = n;
-            accountCount += n;
+        // 桌面端 auth 目录：直接放 workbuddy-desktop.info / -ai.info，没有 cn/ 子目录
+        // （2026-11-13：新电脑通常只有这种，之前完全扫不到）
+        let entries = [];
+        try { entries = readdirSync(x.path); } catch { entries = []; }
+        const infoFiles = entries.filter(
+          (n) => /^workbuddy-desktop.*\.info$/.test(n) && !/\.observation\.json/.test(n),
+        );
+        if (infoFiles.length > 0) {
+          kind = "desktop";
+          regions = { desktop: infoFiles.length };
+          accountCount = infoFiles.length;
+        } else {
+          // dsh vault：按 cn / global 子目录数
+          for (const region of ["cn", "global"]) {
+            const rd = join(x.path, region);
+            if (!existsSync(rd)) continue;
+            let files = [];
+            try { files = readdirSync(rd); } catch { continue; }
+            const n = files.filter((f) => /\.json$/.test(f)).length;
+            if (n > 0) {
+              regions[region] = n;
+              accountCount += n;
+            }
           }
         }
       }
@@ -869,6 +896,7 @@ function scanVaultLocations() {
       exists,
       accountCount,
       regions,
+      kind,
       // 已导入到我们 vault 的数量（去重后）
       imported: exists && accountCount > 0,
     };
