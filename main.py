@@ -608,6 +608,21 @@ class ShimConnector(Star):
             )
             return
 
+        # 先把 vault 目录准备好并做一次性迁移
+        #
+        # 2026-11-18 合规修复：vault 从「插件安装目录」搬到
+        # <data>/plugin_data/<插件名>/<shim>-vault/。
+        # 这里主动调用一次，确保即使所有 shim 都在跑（走复用分支、
+        # 不进 _start_shim）也能完成迁移 —— 否则用户要等下次
+        # 真正重启某个 shim 才搬。
+        for _vn in ("workbuddy", "trae", "qoder"):
+            try:
+                self._vault_dir(_vn)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    f"[shim_connector] 准备 {_vn} vault 目录失败: {exc}"
+                )
+
         all_defs = self._all_defs()
         prev_alive = self._load_prev_alive()
         started = []
@@ -1189,6 +1204,27 @@ class ShimConnector(Star):
         for ek, ev in (spec.get("extra_env") or {}).items():
             env[ek] = str(ev)
 
+        # 账号池 vault 指向 plugin_data（合规要求）
+        #
+        # shim 的默认值在插件安装目录内（shims/.vault 等），
+        # 插件更新会覆盖、迁移时找不到。这里显式覆盖到规范位置。
+        _vault_env = {
+            "workbuddy": "WB_VAULT_DIR",
+            "trae": "TRAE_VAULT_DIR",
+            "qoder": "QODER_VAULT_DIR",
+        }.get(name)
+        if _vault_env:
+            try:
+                _vd = self._vault_dir(name)
+                env[_vault_env] = str(_vd)
+                logger.info(
+                    f"[shim_connector] {name} vault → {_vd}"
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    f"[shim_connector] {name} vault 目录设置失败: {exc}"
+                )
+
         # vision：图片理解专用，保持自己的独立顺序
         #
         # 2026-11-13 修正：不能跟 llm_pool 共用主链顺序。
@@ -1544,6 +1580,136 @@ class ShimConnector(Star):
             fb = Path(tempfile.gettempdir()) / PLUGIN_DIR.name
             fb.mkdir(parents=True, exist_ok=True)
             return fb
+
+    @staticmethod
+    def _harden_file_permissions(path: Path) -> None:
+        """把凭据文件权限收紧到「仅当前用户」。
+
+        POSIX：chmod 0600。
+        Windows：Python 的 os.chmod 只能控制只读位，真正的 ACL 要用 icacls。
+        评审要求「vault 文件以 0600 权限本地落盘」，Windows 上等价做法是
+        去掉继承并只授予当前用户完全控制。
+
+        Args:
+            path: 目标文件或目录。
+        """
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        if sys.platform != "win32":
+            return
+        try:
+            # Windows ACL 收紧的正确顺序（实测得出）：
+            #   1. /reset       恢复继承，避免 /inheritance:r 把 ACL 清成空
+            #   2. /remove:g    逐个移除宽权限组
+            #   3. /grant       显式给当前用户完全控制
+            #
+            # 踩过的坑：
+            #   - 只用 /inheritance:r 会导致 icacls 输出里没有任何 ACE
+            #   - 账户名必须用 whoami 的「域\用户名」，短名会报
+            #     「账户名与安全标识无映射」
+            user = ""
+            try:
+                out = subprocess.run(
+                    ["whoami"],
+                    capture_output=True,
+                    text=True,
+                    timeout=8,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                user = (out.stdout or "").strip()
+            except Exception:  # noqa: BLE001
+                pass
+            if not user:
+                return
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            target = str(path)
+            # 顺序很重要（实测）：
+            #   /inheritance:r 先断继承，再逐个 /remove:g 移除宽权限组，
+            #   最后 /grant 给当前用户。
+            # 反过来（先 reset）会把继承加回来，(I) 标记的组又出现。
+            subprocess.run(["icacls", target, "/inheritance:r"],
+                           capture_output=True, timeout=10, creationflags=flags)
+            for grp in (
+                "BUILTIN\\Users",
+                "NT AUTHORITY\\Authenticated Users",
+                "BUILTIN\\Administrators",
+                "Everyone",
+            ):
+                subprocess.run(["icacls", target, "/remove:g", grp],
+                               capture_output=True, timeout=10, creationflags=flags)
+            subprocess.run(["icacls", target, "/grant", f"{user}:F"],
+                           capture_output=True, timeout=10, creationflags=flags)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _vault_dir(self, shim: str) -> Path:
+        """账号池 vault 目录（凭据落盘位置）。
+
+        规范位置与日志一致：<AstrBot>/data/plugin_data/<插件名>/<shim>-vault/
+
+        ⚠️ 2026-11-18 合规修复：原来三个 shim 默认把 vault 放在
+        **插件安装目录内**（shims/.vault、.trae-vault、.qoder-vault），
+        带来三个问题：
+          1. 插件更新会覆盖该目录 → 用户凭据丢失
+          2. 数据迁移时不知道该搬哪个目录
+          3. 审计时无法区分「插件代码」和「用户数据」
+
+        现在由插件在启动 shim 时显式注入环境变量，
+        把 vault 指向 plugin_data 下的子目录。
+        shim 侧本来就支持这些环境变量覆盖，无需改 shim 逻辑。
+
+        Args:
+            shim: workbuddy | trae | qoder。
+
+        Returns:
+            vault 目录路径（会确保存在）。
+        """
+        sub = {
+            "workbuddy": "workbuddy-vault",
+            "trae": "trae-vault",
+            "qoder": "qoder-vault",
+        }.get(shim, f"{shim}-vault")
+        base = self._log_dir() / sub
+        try:
+            base.mkdir(parents=True, exist_ok=True, mode=0o700)
+            self._harden_file_permissions(base)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                f"[shim_connector] vault 目录创建失败（{base}）: {exc}"
+            )
+            return base
+
+        # 一次性迁移：把旧位置（插件安装目录内）的凭据搬过来
+        #
+        # 只在目标目录为空时搬，避免覆盖用户后来手动放进来的账号。
+        legacy = {
+            "workbuddy": SHIM_DIR / ".vault",
+            "trae": SHIM_DIR / ".trae-vault",
+            "qoder": SHIM_DIR / ".qoder-vault",
+        }.get(shim)
+        if legacy is not None:
+            try:
+                if legacy.is_dir() and not any(base.iterdir()):
+                    moved = 0
+                    for src in legacy.rglob("*.json"):
+                        rel = src.relative_to(legacy)
+                        dst = base / rel
+                        dst.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.move(str(src), str(dst))
+                        self._harden_file_permissions(dst)
+                        moved += 1
+                    if moved:
+                        logger.warning(
+                            f"[shim_connector] 已把 {moved} 个旧 vault 凭据"
+                            f"从插件目录迁到 {base}（原目录 {legacy} 已清空）"
+                        )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    f"[shim_connector] 旧 vault 迁移失败（{legacy} → {base}）: {exc}"
+                )
+        return base
 
     def _log_path(self, name: str) -> Path:
         """某个 shim 的日志文件路径。"""

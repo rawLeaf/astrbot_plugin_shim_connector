@@ -7,6 +7,121 @@
 
 ---
 
+## [1.7.7] — 2026-11-18
+
+### 合规修复：账号凭据改存 plugin_data（评审要求）
+
+插件市场上架评审驳回，原因：
+
+> 多账号池凭据被持久化到插件安装目录内（`shims/.vault/`、
+> `shims/.trae-vault/`、`shims/.qoder-vault/`），而非规范位置
+> `data/plugin_data/<plugin_name>`，影响用户数据迁移和审计，
+> 且插件更新会覆盖该目录。
+
+#### 修复
+
+`_start_shim` 启动 shim 时注入三个环境变量（shim 侧本就支持覆盖）：
+
+```python
+env["WB_VAULT_DIR"]    = str(self._vault_dir("workbuddy"))
+env["TRAE_VAULT_DIR"]  = str(self._vault_dir("trae"))
+env["QODER_VAULT_DIR"] = str(self._vault_dir("qoder"))
+```
+
+新增 `_vault_dir(shim)`，指向：
+
+```
+<AstrBot>/data/plugin_data/astrbot_plugin_shim_connector/
+├── workbuddy-vault/
+├── trae-vault/
+└── qoder-vault/
+```
+
+与日志、`.running.json` 同目录，符合 AstrBot 官方插件持久化约定。
+
+#### 自动迁移（老用户不丢凭据）
+
+`initialize` 里主动调用 `_vault_dir()` 三次，触发一次性迁移：
+
+- 只在**目标目录为空**时搬（不覆盖用户后来放的账号）
+- `shutil.move` 逐个搬 `*.json`，保留 `cn/` `global/` 子目录结构
+- 搬完立即收紧权限
+
+**为什么放 initialize 而不是 _start_shim**：
+shim 都在跑时走「复用」分支，不进 `_start_shim`，
+迁移就永远不执行 —— 第一次实现踩了这个坑。
+
+实测迁移：
+
+```
+迁移前（插件目录）              迁移后（plugin_data）
+shims/.vault/        5 个  →   workbuddy-vault/   5 个
+shims/.trae-vault/   2 个  →   trae-vault/        2 个
+shims/.qoder-vault/  2 个  →   qoder-vault/       2 个
+```
+
+旧目录已删除，重启 shim 不会重建。
+
+#### 权限收紧（评审要求 0600）
+
+迁移后权限变成 `BUILTIN\Users:FullControl`（`shutil.move` 丢了原权限）。
+
+新增 `_harden_file_permissions()`：
+
+- POSIX：`chmod 0600`
+- Windows：`icacls` 四步
+
+踩过的三个坑：
+
+| 坑 | 现象 | 正确做法 |
+|---|---|---|
+| `os.chmod(0o600)` | Windows 上只管只读位 | 必须用 `icacls` |
+| 先 `/reset` 再断继承 | 继承被加回来，`(I)` 组重现 | **先** `/inheritance:r` |
+| 用短账户名 `31165` | 「账户名与安全标识无映射」 | 用 `whoami` 拿 `域\用户名` |
+
+最终顺序：
+
+```
+icacls <file> /inheritance:r
+icacls <file> /remove:g "BUILTIN\Users"
+icacls <file> /remove:g "NT AUTHORITY\Authenticated Users"
+icacls <file> /remove:g "BUILTIN\Administrators"
+icacls <file> /grant "<域\用户名>:F"
+```
+
+实测结果：
+
+```
+workbuddy-vault   leafbr\leafbr:(F)
+trae-vault        leafbr\leafbr:(F)
+qoder-vault       leafbr\leafbr:(F)
+```
+
+#### 文档：明确服务条款风险
+
+评审提示（非阻断）：
+
+> 本插件解密复用本机客户端登录凭据并做多账号额度轮换，
+> 可能违反相关客户端服务条款，建议在插件说明中明确告知用户。
+
+README 新增「⚠️ 使用风险说明」章节，SKILL.md 新增
+「⚠️ 服务条款风险（必须告知用户）」，写明：
+
+- 多账号额度轮换可能违反服务条款
+- 可能导致限流、冻结、封禁
+- 只用自己真实拥有的账号，发现被限流立刻停用整个池
+
+#### 评审其余检查项（均通过）
+
+- 日志仅使用 `astrbot.api` 的 logger
+- 网络 I/O 均为异步，未发现事件循环内同步阻塞
+- 未通过 db_helper 或底层数据库修改 Conversation 上下文
+- 无对模型上下文的破坏性注入
+- 五个 shim 均只绑定 `127.0.0.1`
+- 未发现凭据外传、反弹 shell、隐藏下载、eval 后门或提示词注入
+
+---
+
 ## [1.7.6] — 2026-11-18
 
 ### 修复：Trae / Qoder 的「检测本地账号」扫完一片空白

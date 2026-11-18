@@ -9,7 +9,7 @@ description: 白嫖机器人：把已付费的 WorkBuddy / Trae / Qoder 订阅�
 连同视觉轮换层和 LLM 池，通过 loopback shim 变成 AstrBot 可用的模型源。
 
 **仓库**：https://github.com/rawLeaf/astrbot_plugin_shim_connector
-**当前版本**：v1.7.6（2026-11-18）
+**当前版本**：v1.7.7（2026-11-18）
 
 ---
 
@@ -181,7 +181,7 @@ AstrBot → provider(<source_id>/<model>)
 | 客户端 | 从哪读 |
 |---|---|
 | WorkBuddy（桌面端） | `%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\workbuddy-desktop.info`（CN）/`workbuddy-desktop-ai.info`（INTL），5.6.0+ 的加密字段靠启动 app 取 at-rest 密钥 |
-| WorkBuddy（多账号 vault） | 扫码登录 / 从 `dsh-connect-workbuddy` 的 vault 导入 |
+| WorkBuddy（多账号 vault） | 扫码登录 / 从 `dsh-connect-workbuddy` 的 vault 导入 / 桌面端凭据目录 |
 | Trae | 环境变量 `TRAE_AUTH_FILE` 指向的 JSON |
 | Qoder | `auth.v1.dat`（OSCrypt + DPAPI）|
 
@@ -283,6 +283,71 @@ provider = [{
 
 > 旧版本（v1.0.0）注册的是 `shim_trae_0` 这种扁平 id，升级后会新增一套；
 > 旧的可以手动删，不影响使用。
+
+---
+
+
+## ⚠️ 服务条款风险（必须告知用户）
+
+**多账号额度轮换可能违反 WorkBuddy / Trae / Qoder 的服务条款。**
+
+- 一台机器登多个账号轮流用额度 = 服务商眼里的异常行为
+- 可能导致限流、冻结、封禁
+- 本插件不承担责任
+
+**跟用户沟通时必须说清楚**，不要只讲「能白嫖」。
+建议措辞：
+
+> 这个插件会把你的多个账号轮流用，服务商可能判定异常。
+> 只用你自己真实拥有的账号，发现被限流立刻停用。
+
+---
+
+## 📁 凭据与数据存放位置（合规要求）
+
+**所有用户数据都在 AstrBot 规范目录，不在插件安装目录内。**
+
+```
+<AstrBot>/data/plugin_data/astrbot_plugin_shim_connector/
+├── workbuddy-vault/     ← WorkBuddy 账号凭据（cn/ global/）
+├── trae-vault/          ← Trae 账号凭据
+├── qoder-vault/         ← Qoder 账号凭据（qoder-cn/ qoder/）
+├── .running.json        ← 运行状态（PID 记录，看门狗用）
+└── *.log                ← 各 shim 日志
+```
+
+**为什么不放插件目录**（2026-11-18 合规评审）：
+
+| 问题 | 说明 |
+|---|---|
+| 插件更新会覆盖 | `shims/.vault` 在插件包里，更新时被清掉 → 用户凭据丢失 |
+| 迁移困难 | 不知道该搬哪个目录 |
+| 审计不清 | 分不清「插件代码」和「用户数据」 |
+
+插件在 `_start_shim` 里通过环境变量注入路径：
+
+```python
+env["WB_VAULT_DIR"]    = str(self._vault_dir("workbuddy"))
+env["TRAE_VAULT_DIR"]  = str(self._vault_dir("trae"))
+env["QODER_VAULT_DIR"] = str(self._vault_dir("qoder"))
+```
+
+**旧版本升级会自动迁移**：`initialize` 时若目标目录为空，
+把插件目录里的旧 vault 搬过来（`shutil.move` + 权限收紧）。
+
+### 权限
+
+- POSIX：`chmod 0600`
+- Windows：`icacls /inheritance:r` + 移除 `BUILTIN\\Users` /
+  `Authenticated Users` / `Administrators` + 只授予当前用户
+
+实测结果：
+
+```
+workbuddy-vault   leafbr\leafbr:(F)
+trae-vault        leafbr\leafbr:(F)
+qoder-vault       leafbr\leafbr:(F)
+```
 
 ---
 
