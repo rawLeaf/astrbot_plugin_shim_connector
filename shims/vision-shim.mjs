@@ -112,6 +112,81 @@ function recordCost(model, credit, usage) {
   costDirty = true;
 }
 
+/* ── 拒绝检测（2026-11-18）─────────────────────────────────
+ * 上游视觉模型遇到擦边/敏感图，会返回 HTTP 200 + 正常 JSON 结构，
+ * 但 content 是一句安全拒绝话术，例如：
+ *   「我无法为你详细描述这张图里的具体画面内容。」
+ *   「我不能为这类包含低俗擦边、不良导向内容的信息提供描述服务」
+ *
+ * 这不算识图成功。命中时应返回非 null，调用方据此判定失败、轮换下一个。
+ *
+ * 两层判定（因为上游拒绝话术是活的，穷举追不上）：
+ *   第 1 层：列举常见明确话术
+ *   第 2 层：结构启发式 —— 有拒绝动词 + 提到描述/画面 + 完全没有画面内容词
+ * ──────────────────────────────────────────────────────── */
+const REFUSAL_PATTERNS = [
+  // 能力缺失类
+  /无法(为|帮)?你?(详细)?描述/,
+  /无法查看/, /无法看到/, /无法处理(此|这)?(张)?图/, /无法分析(图|图像|图片)/,
+  /无法接收(和处理)?(图|图像|图片)/, /无法提供描述/,
+  /不支持多模态/, /不支持(图|图像|图片)(输入)?/,
+  /不具备(接收和)?分析图像的能力/, /纯文本模型/,
+  // 价值判断类
+  /不能为这类/, /不能提供描述服务/, /不能(为你|对这张|对这种).{0,15}描述/,
+  /不对这类(画面|内容|信息).{0,8}描述/, /不(会)?提供(具体)?描述/,
+  /进行描述传播/, /自觉远离这类/, /请你远离这类/,
+  // 合规话术类
+  /清朗网络空间/, /不良网络信息/, /违背公序良俗/,
+  /软色情擦边|低俗擦边性质|涉及低俗/,
+  /不适合(对)?此?类内容/,
+  // 其它
+  /看不见(这张)?图/,
+  // 英文
+  /I can(?:'|')t see/i, /I'?m unable to (view|see|analy)/i,
+  /I cannot (view|see|analy|process)/i, /as a text-only model/i,
+];
+
+// 第 2 层启发式用的词表
+const REFUSAL_VERBS = /我不能|我无法|无法|不能|抱歉|拒绝|不予|不便|不适合/;
+const DESCRIBE_WORDS = /描述|画面|图片|图像|内容/;
+// 注意：这里只放「客观画面元素」，绝对不能放「擦边」「低俗」「色情」
+// 因为正常描述里也会出现「擦边广告」「色情擦边球」，放了会误杀
+const CONTENT_WORDS = /左侧|右侧|左边|右边|截图|卡片|广告|视频|播放|点赞|封面|角色|人物|文字|界面|页面/;
+
+/**
+ * 判断一次视觉响应是否为拒绝。
+ * @param {any} payload 上游返回的 JSON（OpenAI chat.completion 结构）
+ * @returns {string|null} 命中返回原因（用于日志），未命中返回 null
+ */
+function detectRefusal(payload) {
+  let text = "";
+  try {
+    const ch = (payload && payload.choices && payload.choices[0]) || {};
+    text = String((ch.message || {}).content || "").trim();
+  } catch {
+    return null;
+  }
+  if (!text) return null;
+  const head = text.slice(0, 90);
+
+  // 第 1 层：明确话术
+  for (const re of REFUSAL_PATTERNS) {
+    if (re.test(head)) return head.slice(0, 60);
+  }
+
+  // 第 2 层：结构启发式（短回复 + 有拒绝动词 + 提到描述 + 没有画面内容词）
+  if (
+    text.length < 300 &&
+    REFUSAL_VERBS.test(head) &&
+    DESCRIBE_WORDS.test(head) &&
+    !CONTENT_WORDS.test(head)
+  ) {
+    return "heuristic: " + head.slice(0, 50);
+  }
+
+  return null;
+}
+
 /** 记录一次失败。 */
 function recordFail(model) {
   if (!model) return;
@@ -336,7 +411,9 @@ function loadTargets() {
   // 提示被跳过的目标 —— 常见于用户删掉了某个 provider，
   // 但配置里还留着它的 id（或者用了别人配置的默认列表）
   if (skipped.length > 0) {
-    console.error("[vision-shim] ${skipped.length} 个目标被跳过（在配置里但用不了）：");
+    console.error(
+      "[vision-shim] " + skipped.length + " 个目标被跳过（在配置里但用不了）：",
+    );
     for (const s of skipped) {
       console.error("  ✗ " + s.id + "  —— " + s.why);
     }
@@ -357,6 +434,26 @@ let cursor = 0;
 /** 失败后冷却多久再参与轮换 */
 const COOLDOWN_RATE_LIMIT = 60_000;
 const COOLDOWN_OTHER = 30_000;
+
+/* ── 超时预算（2026-11-18）──────────────────────────────────
+ * 轮换是串行的。固定超时有两个死结：
+ *   - 太小：误杀慢但成功的请求（实测 p99 达 30s，max 85s）
+ *   - 太大：第一个目标卡满就拖死整轮（调用方断开 → 后续全 AbortError）
+ *
+ * 改成按剩余预算动态分配：每个目标最多用「剩余时间 / 剩余目标数」，
+ * 并夹在 [MIN, MAX] 之间，保证目标多时每个仍有机会。
+ *
+ * 环境变量（单位：秒）：
+ *   VISION_CALLER_BUDGET_MS  调用方总预算，默认 100
+ *   VISION_TARGET_MIN_MS     单目标下限，默认 8
+ *   VISION_TARGET_MAX_MS     单目标上限，默认 60
+ * ──────────────────────────────────────────────────────── */
+const CALLER_BUDGET_MS =
+  Number(process.env.VISION_CALLER_BUDGET_MS ?? 100) * 1000 || 100_000;
+const TARGET_TIMEOUT_MIN_MS =
+  Number(process.env.VISION_TARGET_MIN_MS ?? 8) * 1000 || 8_000;
+const TARGET_TIMEOUT_MAX_MS =
+  Number(process.env.VISION_TARGET_MAX_MS ?? 60) * 1000 || 60_000;
 
 
 const LIMIT = 64 * 1024 * 1024;
@@ -513,23 +610,63 @@ async function handleChat(req, res) {
   }
 
   const failures = [];
+  const budgetStart = Date.now();
+  let tried = 0;
   for (const t of order) {
     if (t.cooldownUntil > now) {
       failures.push(t.id + ": cooldown");
       continue;
     }
+    // 动态预算：剩余时间 / 剩余未尝试目标数，夹在 [MIN, MAX]
+    const remainingMs = CALLER_BUDGET_MS - (Date.now() - budgetStart);
+    if (remainingMs < TARGET_TIMEOUT_MIN_MS) {
+      failures.push(t.id + ": budget exhausted");
+      break;
+    }
+    const remainingTargets = order.filter(
+      (x) => x.cooldownUntil <= now,
+    ).length - tried;
+    const perTargetMs = Math.max(
+      TARGET_TIMEOUT_MIN_MS,
+      Math.min(
+        TARGET_TIMEOUT_MAX_MS,
+        Math.floor(remainingMs / Math.max(1, remainingTargets)),
+      ),
+    );
+    tried += 1;
+    console.error(
+      "[vision-shim] " + t.id + " 尝试（预算 " + perTargetMs + "ms）",
+    );
     const t0 = Date.now();
     let r;
     try {
       r = await tryOne(
         t,
         bodyObj,
-        AbortSignal.any([controller.signal, AbortSignal.timeout(120_000)]),
+        AbortSignal.any([
+          controller.signal,
+          AbortSignal.timeout(perTargetMs),
+        ]),
       );
     } catch (error) {
       r = { ok: false, rateLimited: false, status: 0, detail: "transport: " + String(error) };
     }
     const ms = Date.now() - t0;
+
+    // 🆕 2026-11-18 拒绝检测：HTTP 200 但内容是拒答，不算成功。
+    // 上游遇到敏感图会返回 200 + 正常结构 + 拒绝文案，
+    // 不拦的话会把它当图片描述传给上层，用户看到「图没读出来」。
+    if (r.ok) {
+      const refusal = detectRefusal(r.payload);
+      if (refusal) {
+        r = {
+          ok: false,
+          rateLimited: false,
+          status: 200,
+          detail: "refusal: " + refusal,
+        };
+      }
+    }
 
     if (r.ok) {
       t.okCount += 1;
