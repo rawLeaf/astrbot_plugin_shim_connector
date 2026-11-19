@@ -1,6 +1,6 @@
 name: "astrbot_plugin_shim_connector"
 display_name: "白嫖机器人 | 本机模型接入"
-short_desc: "把你已付费的 WorkBuddy / Trae / Qoder 订阅变成机器人模型源，75 个候选模型可勾选，支持多账号池和余额查看，零 API 费用。"
+short_desc: "【需要 Node.js 18+】把已付费的 WorkBuddy / Trae / Qoder 订阅变成机器人模型源，75 个候选模型可勾选，支持多账号池和余额查看，零 API 费用。"
 author: "rawLeaf"
 description: >-
   白嫖机器人：把你已经付过钱的 AI 订阅（WorkBuddy / Trae / Qoder）直接变成 AstrBot 的模型源。
@@ -30,7 +30,7 @@ description: >-
   五个 shim 都有 /cost 耗费统计，按模型 + 按账号两个维度。
 
 
-version: "1.7.7"
+version: "1.7.8"
 repo: "https://github.com/rawLeaf/astrbot_plugin_shim_connector"
 homepage: "https://github.com/rawLeaf/astrbot_plugin_shim_connector"
 license: "MIT"

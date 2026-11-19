@@ -4,6 +4,15 @@
 
 ---
 
+> [!IMPORTANT]
+> ## 🔧 装之前先装 Node.js
+>
+> 去 https://nodejs.org/ 下 **LTS** 版，一路下一步装完，**重启 AstrBot**。
+>
+> 就这一步。别的什么都不用装。
+
+---
+
 > [!CAUTION]
 > # ⚠️ 请先读这段再决定装不装
 >
@@ -326,13 +335,13 @@ $DSH_HOME/workbuddy-vault  （环境变量）
 
 ---
 
-## 安装（零配置）
+## 安装
 
-**装完就能用。不需要填任何 token、路径或密钥。**
-
-1. 装 **Node.js**（>= 18）
+1. 装 **Node.js**（https://nodejs.org/ 选 LTS）→ 重启 AstrBot
 2. 装并登录任意一个客户端：**WorkBuddy / Trae / Qoder**（装几个用几个）
-3. AstrBot 插件页安装本插件 → 重启
+3. AstrBot 插件页装本插件 → 重启
+
+**完事。** 不用填 token、路径、密钥，不用 npm install，不用 pip install。
 
 就这样。插件会自动：
 
@@ -871,7 +880,7 @@ WorkBuddy（腾讯 CodeBuddy） / Trae（字节） / Qoder（阿里）的服务�
 ---
 ## 变更日志
 
-当前版本 **1.7.7** —— 完整变更见 [CHANGELOG.md](CHANGELOG.md)。
+当前版本 **1.7.8** —— 完整变更见 [CHANGELOG.md](CHANGELOG.md)。
 
 ---
 

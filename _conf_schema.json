@@ -8,7 +8,7 @@
         "description": "全部开启",
         "type": "bool",
         "default": true,
-        "hint": "**总闸**。最终启用 = 总闸 AND 各 shim 的「启用」开关。\n\n  · 开 → 按各 shim 自己的开关决定\n  · 关 → 全部不启动（各分开关怎么设都没用）\n\n想临时全停（不重启）：调 Web API，或逐个关分开关后重启。",
+        "hint": "全部 shim 的总开关。关掉后所有 shim 都不启动。",
         "obvious_hint": true
       },
       "custom": {
@@ -18,7 +18,7 @@
           "type": "string"
         },
         "default": [],
-        "hint": "每行一个，格式：\n  名称|脚本文件|端口|token\n\n例：\n  mymodel|my-shim.mjs|9000|sk-my-local\n\n脚本可以放插件 shims/ 目录下，也可以写绝对路径。\n脚本需提供 /healthz、/v1/models、/v1/chat/completions。\n\n自定义 shim 默认视为启用（受总开关约束）。"
+        "hint": "自定义 shim 定义。一般不用动。"
       }
     }
   },
@@ -31,7 +31,7 @@
         "description": "启用",
         "type": "bool",
         "default": true,
-        "hint": "本 shim 的开关。**最终启用 = 总闸 AND 这一项**（总闸关闭时这一项不生效）。\n\n改完保存后需要重启 AstrBot 才生效。\n\n想不重启就启停单个 shim：\n  POST /api/v1/plugins/extensions/astrbot_plugin_shim_connector/toggle\n  body: {\"name\":\"trae\"}\n  （需要面板登录态；插件页的热启停按钮走的也是这个接口）\n\n注意：通过 API 停用的 shim 只对本次运行有效，\n重启 AstrBot 后仍按这里的配置决定。",
+        "hint": "本 shim 开关。最终启用 = 总闸 AND 这一项。",
         "obvious_hint": true
       },
       "models": {
@@ -41,25 +41,26 @@
           "type": "string"
         },
         "default": [],
-        "hint": "留空 = 注册全部可选模型。\n\n可选：\n  space-bunny （默认，多模态）\n  deepseek-v4.1-flash\n  deepseek-v4-pro\n  minimax-m3.1-flash\n  glm-5.3-flash\n  kimi-k2.6\n\n填法：每行一个模型 id，或用上方「列表」输入框逐个添加。\n填了但不在可选列表里的会被忽略。"
+        "hint": "要注册给 AstrBot 的模型名。"
       },
       "port": {
         "description": "端口",
         "type": "int",
-        "default": 8787
+        "default": 8787,
+        "hint": "本机监听端口，改完要重启该 shim。"
       },
       "token": {
         "description": "占位 Token",
         "type": "string",
         "default": "sk-workbuddy-local",
-        "hint": "插件与 shim 之间的认证口令，**两端自动同步，一般不用改**。\n\n它是干什么的：\n  1. 插件启动 shim 时，把它作为环境变量传给 shim（如 TRAE_SHIM_TOKEN）\n  2. shim 用它校验每个请求的 Bearer（只接受这个值）\n  3. 插件注册模型时，把同一个值填进 provider 的 key\n  两边必须一致，否则 AstrBot 调模型会被 shim 拒绝（401）。\n\n安全吗：\n  shim 只绑 127.0.0.1，这个 token 只在本机回环上生效。\n  它不是你的 WorkBuddy / Trae / Qoder 账号密钥，\n  改了也不影响客户端登录。\n\n什么时候需要改：\n  同机跑多套插件实例、需要区分时。否则保持默认即可。",
+        "hint": "插件与 shim 之间的口令，两端自动同步，不用改。",
         "obvious_hint": true
       },
       "auto_tune": {
         "description": "自动调节模型顺序",
         "type": "bool",
         "default": true,
-        "hint": "**开着就会自己学**：长期超时/失败的模型自动沉到后面，好的浮上来。\n\n怎么算（按健康分 0~100，初始 70）：\n  · 成功一次 **+5**\n  · 超时一次 **−25**（超时最伤，用户等不起）\n  · 其他失败 **−12**\n\n排序规则：分数从高到低，同分按「优先级列表」的顺序。\n分数存盘，重启不丢。\n\n**关掉** = 严格按「优先级列表」固定顺序，不学习。\n\n怎么手动干预：\n  · 想强制某个模型排第一 → 填进「优先级列表」最前面\n  · 分数被玩坏了 → 调 POST .../reset-health 重置回 70\n  · 想看当前分数和实际顺序 → GET .../health?name=<shim名>",
+        "hint": "按健康分自动调整顺序：成功加分，失败/超时扣分。",
         "obvious_hint": true
       },
       "cost_hint": {
@@ -67,7 +68,7 @@
         "type": "string",
         "default": "",
         "_special": "divider",
-        "hint": "**怎么知道哪些模型免费、哪些花钱？**\n\n看插件页的「模型名册」或者调：\n  GET /api/v1/plugins/extensions/astrbot_plugin_shim_connector/catalog\n\n返回里每个模型带：\n  · `free: true` → 免费\n  · `cost: 0.01` → 每次约扣 0.01 积分\n  · `latencyMs` → 实测延迟\n\n已实测的免费模型（workbuddy）：\n  glm-5.2 / space-bunny / hy3-b / hy3-c / hy3-x /\n  deepseek-v4.1-flash / hy3 / deepseek-v4-flash /\n  deepseek-v4-pro / auto / glm-5.3-flash / hy4free\n\n要钱的：hy4std(0.06) / glm-5.3(0.01) / minimax-m3.1-flash(0.01) /\n         step-5-preview(0.02)\n\n**注意 hy4 分两个版本**：hy4free 免费但慢（5.5s），hy4std 要钱但快（3.5s）。",
+        "hint": "看插件页「模型名册」，每个模型标了免费/收费和延迟。",
         "obvious_hint": true
       }
     }
@@ -81,7 +82,7 @@
         "description": "启用",
         "type": "bool",
         "default": true,
-        "hint": "本 shim 的开关。**最终启用 = 总闸 AND 这一项**（总闸关闭时这一项不生效）。\n\n改完保存后需要重启 AstrBot 才生效。\n\n想不重启就启停单个 shim：\n  POST /api/v1/plugins/extensions/astrbot_plugin_shim_connector/toggle\n  body: {\"name\":\"trae\"}\n  （需要面板登录态；插件页的热启停按钮走的也是这个接口）\n\n注意：通过 API 停用的 shim 只对本次运行有效，\n重启 AstrBot 后仍按这里的配置决定。",
+        "hint": "本 shim 开关。最终启用 = 总闸 AND 这一项。",
         "obvious_hint": true
       },
       "models": {
@@ -91,25 +92,26 @@
           "type": "string"
         },
         "default": [],
-        "hint": "留空 = 注册全部可选模型。\n\n可选：\n  DeepSeek-V4-Flash-Official （最稳）\n  glm-5.3-flash\n  Doubao-Seed-Code\n  mimo-v2.6-flash\n  minimax-m3.1-flash\n  qwen3.8-flash"
+        "hint": "要注册给 AstrBot 的模型名。"
       },
       "port": {
         "description": "端口",
         "type": "int",
-        "default": 8788
+        "default": 8788,
+        "hint": "本机监听端口，改完要重启该 shim。"
       },
       "token": {
         "description": "占位 Token",
         "type": "string",
         "default": "sk-trae-local",
-        "hint": "插件与 shim 之间的认证口令，**两端自动同步，一般不用改**。\n\n它是干什么的：\n  1. 插件启动 shim 时，把它作为环境变量传给 shim（如 TRAE_SHIM_TOKEN）\n  2. shim 用它校验每个请求的 Bearer（只接受这个值）\n  3. 插件注册模型时，把同一个值填进 provider 的 key\n  两边必须一致，否则 AstrBot 调模型会被 shim 拒绝（401）。\n\n安全吗：\n  shim 只绑 127.0.0.1，这个 token 只在本机回环上生效。\n  它不是你的 WorkBuddy / Trae / Qoder 账号密钥，\n  改了也不影响客户端登录。\n\n什么时候需要改：\n  同机跑多套插件实例、需要区分时。否则保持默认即可。",
+        "hint": "插件与 shim 之间的口令，两端自动同步，不用改。",
         "obvious_hint": true
       },
       "auto_tune": {
         "description": "自动调节模型顺序",
         "type": "bool",
         "default": true,
-        "hint": "**开着就会自己学**：长期超时/失败的模型自动沉到后面，好的浮上来。\n\n怎么算（按健康分 0~100，初始 70）：\n  · 成功一次 **+5**\n  · 超时一次 **−25**（超时最伤，用户等不起）\n  · 其他失败 **−12**\n\n排序规则：分数从高到低，同分按「优先级列表」的顺序。\n分数存盘，重启不丢。\n\n**关掉** = 严格按「优先级列表」固定顺序，不学习。\n\n怎么手动干预：\n  · 想强制某个模型排第一 → 填进「优先级列表」最前面\n  · 分数被玩坏了 → 调 POST .../reset-health 重置回 70\n  · 想看当前分数和实际顺序 → GET .../health?name=<shim名>",
+        "hint": "按健康分自动调整顺序：成功加分，失败/超时扣分。",
         "obvious_hint": true
       },
       "cost_hint": {
@@ -117,7 +119,7 @@
         "type": "string",
         "default": "",
         "_special": "divider",
-        "hint": "**怎么知道哪些模型免费、哪些花钱？**\n\n看插件页的「模型名册」或者调：\n  GET /api/v1/plugins/extensions/astrbot_plugin_shim_connector/catalog\n\n返回里每个模型带：\n  · `free: true` → 免费\n  · `cost: 0.01` → 每次约扣 0.01 积分\n  · `latencyMs` → 实测延迟\n\n已实测的免费模型（workbuddy）：\n  glm-5.2 / space-bunny / hy3-b / hy3-c / hy3-x /\n  deepseek-v4.1-flash / hy3 / deepseek-v4-flash /\n  deepseek-v4-pro / auto / glm-5.3-flash / hy4free\n\n要钱的：hy4std(0.06) / glm-5.3(0.01) / minimax-m3.1-flash(0.01) /\n         step-5-preview(0.02)\n\n**注意 hy4 分两个版本**：hy4free 免费但慢（5.5s），hy4std 要钱但快（3.5s）。",
+        "hint": "看插件页「模型名册」，每个模型标了免费/收费和延迟。",
         "obvious_hint": true
       }
     }
@@ -131,7 +133,7 @@
         "description": "启用",
         "type": "bool",
         "default": true,
-        "hint": "本 shim 的开关。**最终启用 = 总闸 AND 这一项**（总闸关闭时这一项不生效）。\n\n改完保存后需要重启 AstrBot 才生效。\n\n想不重启就启停单个 shim：\n  POST /api/v1/plugins/extensions/astrbot_plugin_shim_connector/toggle\n  body: {\"name\":\"trae\"}\n  （需要面板登录态；插件页的热启停按钮走的也是这个接口）\n\n注意：通过 API 停用的 shim 只对本次运行有效，\n重启 AstrBot 后仍按这里的配置决定。",
+        "hint": "本 shim 开关。最终启用 = 总闸 AND 这一项。",
         "obvious_hint": true
       },
       "models": {
@@ -141,25 +143,26 @@
           "type": "string"
         },
         "default": [],
-        "hint": "留空 = 注册全部可选模型（共 24 个，国内 + 国际两区）。\n\n模型 id 形如 qoder-cn/qmodel_38max、qoder-cn/dfmodel。\n注意：模型列表要实时从上游拉取，首次探测可能需要 10 秒以上。\n\n建议只填你实际要用的，避免注册太多导致模型选择列表过长。"
+        "hint": "要注册给 AstrBot 的模型名。"
       },
       "port": {
         "description": "端口",
         "type": "int",
-        "default": 8789
+        "default": 8789,
+        "hint": "本机监听端口，改完要重启该 shim。"
       },
       "token": {
         "description": "占位 Token",
         "type": "string",
         "default": "sk-qoder-local",
-        "hint": "插件与 shim 之间的认证口令，**两端自动同步，一般不用改**。\n\n它是干什么的：\n  1. 插件启动 shim 时，把它作为环境变量传给 shim（如 TRAE_SHIM_TOKEN）\n  2. shim 用它校验每个请求的 Bearer（只接受这个值）\n  3. 插件注册模型时，把同一个值填进 provider 的 key\n  两边必须一致，否则 AstrBot 调模型会被 shim 拒绝（401）。\n\n安全吗：\n  shim 只绑 127.0.0.1，这个 token 只在本机回环上生效。\n  它不是你的 WorkBuddy / Trae / Qoder 账号密钥，\n  改了也不影响客户端登录。\n\n什么时候需要改：\n  同机跑多套插件实例、需要区分时。否则保持默认即可。",
+        "hint": "插件与 shim 之间的口令，两端自动同步，不用改。",
         "obvious_hint": true
       },
       "auto_tune": {
         "description": "自动调节模型顺序",
         "type": "bool",
         "default": true,
-        "hint": "**开着就会自己学**：长期超时/失败的模型自动沉到后面，好的浮上来。\n\n怎么算（按健康分 0~100，初始 70）：\n  · 成功一次 **+5**\n  · 超时一次 **−25**（超时最伤，用户等不起）\n  · 其他失败 **−12**\n\n排序规则：分数从高到低，同分按「优先级列表」的顺序。\n分数存盘，重启不丢。\n\n**关掉** = 严格按「优先级列表」固定顺序，不学习。\n\n怎么手动干预：\n  · 想强制某个模型排第一 → 填进「优先级列表」最前面\n  · 分数被玩坏了 → 调 POST .../reset-health 重置回 70\n  · 想看当前分数和实际顺序 → GET .../health?name=<shim名>",
+        "hint": "按健康分自动调整顺序：成功加分，失败/超时扣分。",
         "obvious_hint": true
       },
       "cost_hint": {
@@ -167,7 +170,7 @@
         "type": "string",
         "default": "",
         "_special": "divider",
-        "hint": "**怎么知道哪些模型免费、哪些花钱？**\n\n看插件页的「模型名册」或者调：\n  GET /api/v1/plugins/extensions/astrbot_plugin_shim_connector/catalog\n\n返回里每个模型带：\n  · `free: true` → 免费\n  · `cost: 0.01` → 每次约扣 0.01 积分\n  · `latencyMs` → 实测延迟\n\n已实测的免费模型（workbuddy）：\n  glm-5.2 / space-bunny / hy3-b / hy3-c / hy3-x /\n  deepseek-v4.1-flash / hy3 / deepseek-v4-flash /\n  deepseek-v4-pro / auto / glm-5.3-flash / hy4free\n\n要钱的：hy4std(0.06) / glm-5.3(0.01) / minimax-m3.1-flash(0.01) /\n         step-5-preview(0.02)\n\n**注意 hy4 分两个版本**：hy4free 免费但慢（5.5s），hy4std 要钱但快（3.5s）。",
+        "hint": "看插件页「模型名册」，每个模型标了免费/收费和延迟。",
         "obvious_hint": true
       }
     }
@@ -181,7 +184,7 @@
         "description": "启用",
         "type": "bool",
         "default": false,
-        "hint": "本 shim 的开关。**最终启用 = 总闸 AND 这一项**（总闸关闭时这一项不生效）。\n\n改完保存后需要重启 AstrBot 才生效。\n\n想不重启就启停单个 shim：\n  POST /api/v1/plugins/extensions/astrbot_plugin_shim_connector/toggle\n  body: {\"name\":\"trae\"}\n  （需要面板登录态；插件页的热启停按钮走的也是这个接口）\n\n注意：通过 API 停用的 shim 只对本次运行有效，\n重启 AstrBot 后仍按这里的配置决定。",
+        "hint": "本 shim 开关。最终启用 = 总闸 AND 这一项。",
         "obvious_hint": true
       },
       "models": {
@@ -191,25 +194,26 @@
           "type": "string"
         },
         "default": [],
-        "hint": "留空 = 全部。模型与国内版相同。"
+        "hint": "要注册给 AstrBot 的模型名。"
       },
       "port": {
         "description": "端口",
         "type": "int",
-        "default": 8790
+        "default": 8790,
+        "hint": "本机监听端口，改完要重启该 shim。"
       },
       "token": {
         "description": "占位 Token",
         "type": "string",
         "default": "sk-workbuddy-intl",
-        "hint": "插件与 shim 之间的认证口令，**两端自动同步，一般不用改**。\n\n它是干什么的：\n  1. 插件启动 shim 时，把它作为环境变量传给 shim（如 TRAE_SHIM_TOKEN）\n  2. shim 用它校验每个请求的 Bearer（只接受这个值）\n  3. 插件注册模型时，把同一个值填进 provider 的 key\n  两边必须一致，否则 AstrBot 调模型会被 shim 拒绝（401）。\n\n安全吗：\n  shim 只绑 127.0.0.1，这个 token 只在本机回环上生效。\n  它不是你的 WorkBuddy / Trae / Qoder 账号密钥，\n  改了也不影响客户端登录。\n\n什么时候需要改：\n  同机跑多套插件实例、需要区分时。否则保持默认即可。",
+        "hint": "插件与 shim 之间的口令，两端自动同步，不用改。",
         "obvious_hint": true
       },
       "auto_tune": {
         "description": "自动调节模型顺序",
         "type": "bool",
         "default": true,
-        "hint": "**开着就会自己学**：长期超时/失败的模型自动沉到后面，好的浮上来。\n\n怎么算（按健康分 0~100，初始 70）：\n  · 成功一次 **+5**\n  · 超时一次 **−25**（超时最伤，用户等不起）\n  · 其他失败 **−12**\n\n排序规则：分数从高到低，同分按「优先级列表」的顺序。\n分数存盘，重启不丢。\n\n**关掉** = 严格按「优先级列表」固定顺序，不学习。\n\n怎么手动干预：\n  · 想强制某个模型排第一 → 填进「优先级列表」最前面\n  · 分数被玩坏了 → 调 POST .../reset-health 重置回 70\n  · 想看当前分数和实际顺序 → GET .../health?name=<shim名>",
+        "hint": "按健康分自动调整顺序：成功加分，失败/超时扣分。",
         "obvious_hint": true
       },
       "cost_hint": {
@@ -217,7 +221,7 @@
         "type": "string",
         "default": "",
         "_special": "divider",
-        "hint": "**怎么知道哪些模型免费、哪些花钱？**\n\n看插件页的「模型名册」或者调：\n  GET /api/v1/plugins/extensions/astrbot_plugin_shim_connector/catalog\n\n返回里每个模型带：\n  · `free: true` → 免费\n  · `cost: 0.01` → 每次约扣 0.01 积分\n  · `latencyMs` → 实测延迟\n\n已实测的免费模型（workbuddy）：\n  glm-5.2 / space-bunny / hy3-b / hy3-c / hy3-x /\n  deepseek-v4.1-flash / hy3 / deepseek-v4-flash /\n  deepseek-v4-pro / auto / glm-5.3-flash / hy4free\n\n要钱的：hy4std(0.06) / glm-5.3(0.01) / minimax-m3.1-flash(0.01) /\n         step-5-preview(0.02)\n\n**注意 hy4 分两个版本**：hy4free 免费但慢（5.5s），hy4std 要钱但快（3.5s）。",
+        "hint": "看插件页「模型名册」，每个模型标了免费/收费和延迟。",
         "obvious_hint": true
       }
     }
@@ -231,7 +235,7 @@
         "description": "启用",
         "type": "bool",
         "default": false,
-        "hint": "本 shim 的开关。**最终启用 = 总闸 AND 这一项**（总闸关闭时这一项不生效）。\n\n改完保存后需要重启 AstrBot 才生效。\n\n想不重启就启停单个 shim：\n  POST /api/v1/plugins/extensions/astrbot_plugin_shim_connector/toggle\n  body: {\"name\":\"trae\"}\n  （需要面板登录态；插件页的热启停按钮走的也是这个接口）\n\n注意：通过 API 停用的 shim 只对本次运行有效，\n重启 AstrBot 后仍按这里的配置决定。",
+        "hint": "本 shim 开关。最终启用 = 总闸 AND 这一项。",
         "obvious_hint": true
       },
       "models": {
@@ -243,18 +247,19 @@
         "default": [
           "vision-auto"
         ],
-        "hint": "通常保持默认的 vision-auto 即可（这只是个虚拟模型名，实际由内部轮换）。"
+        "hint": "要注册给 AstrBot 的模型名。"
       },
       "port": {
         "description": "端口",
         "type": "int",
-        "default": 8791
+        "default": 8791,
+        "hint": "本机监听端口，改完要重启该 shim。"
       },
       "token": {
         "description": "占位 Token",
         "type": "string",
         "default": "sk-vision-local",
-        "hint": "插件与 shim 之间的认证口令，**两端自动同步，一般不用改**。\n\n它是干什么的：\n  1. 插件启动 shim 时，把它作为环境变量传给 shim（如 TRAE_SHIM_TOKEN）\n  2. shim 用它校验每个请求的 Bearer（只接受这个值）\n  3. 插件注册模型时，把同一个值填进 provider 的 key\n  两边必须一致，否则 AstrBot 调模型会被 shim 拒绝（401）。\n\n安全吗：\n  shim 只绑 127.0.0.1，这个 token 只在本机回环上生效。\n  它不是你的 WorkBuddy / Trae / Qoder 账号密钥，\n  改了也不影响客户端登录。\n\n什么时候需要改：\n  同机跑多套插件实例、需要区分时。否则保持默认即可。",
+        "hint": "插件与 shim 之间的口令，两端自动同步，不用改。",
         "obvious_hint": true
       },
       "strategy": {
@@ -271,7 +276,7 @@
             "value": "roundrobin"
           }
         ],
-        "hint": "**priority（推荐）**：严格按「优先级列表」顺序，前面的能用就一直用。\n  前面的冷却或连续失败达阈值，才退到下一个。\n\n**roundrobin**：每次换下一个，均摊负载。",
+        "hint": "priority = 按优先级；roundrobin = 轮换均摊。",
         "obvious_hint": true
       },
       "priority": {
@@ -281,49 +286,49 @@
           "type": "string"
         },
         "default": [],
-        "hint": "**靠前的优先使用。** 留空 = 用内置默认顺序（已按实测成功率排好）。\n\n内置默认顺序（2026-11-04 实测）：\n  1. workbuddy_shim/minimax-m3.1-flash    95%  8.9s\n  2. workbuddy_intl/minimax-m3.1-flash    87%  9.1s\n  3. zhipu_vision                         76%  5.4s（余额不足时会全挂）\n  4. intern_qwen_vision                   27%  9.2s（quota 超限）\n  5. qoder_shim/qoder-cn/gfmodel          12% 12.8s（排队）\n\n想只用前两个就只填那两个，后面的不会被尝试。",
+        "hint": "靠前的先用。留空用内置默认顺序。",
         "obvious_hint": true
       },
       "fail_threshold": {
         "description": "降级阈值",
         "type": "int",
         "default": 2,
-        "hint": "priority 模式下，某个目标**连续失败几次**就排到最后。\n\n  2（默认）—— 失败 2 次就降级，反应快\n  5 —— 更宽容，适合偶发超时的场景\n\n成功一次会自动重置计数。",
+        "hint": "连续失败几次降到最后。默认 2。",
         "obvious_hint": true
       },
       "auto_tune": {
         "description": "自动调节",
         "type": "bool",
         "default": true,
-        "hint": "**开着就会自己学**：长期超时/失败的模型自动沉到后面，好的浮上来。\n\n怎么算：\n  · 成功一次 +5 分\n  · 超时一次 -25 分（超时最伤，用户等不起）\n  · 其他失败 -12 分\n  · 分数 0~100，初始 70\n\n排序规则：按分数从高到低，同分按「优先级列表」的顺序。\n分数会存到文件，重启不丢。\n\n关掉的话就严格按「优先级列表」的固定顺序，不学习。",
+        "hint": "按健康分自动调整顺序：成功加分，失败/超时扣分。",
         "obvious_hint": true
       },
       "timeout_penalty": {
         "description": "超时扣分",
         "type": "int",
         "default": 25,
-        "hint": "一次超时扣多少分（1~100，默认 25）。\n\n扣得越狠，超时的模型沉得越快。\n如果上游本来就慢（比如视觉模型要 10-20 秒），可以调小到 10-15，\n避免正常慢但能用的模型被误判。",
+        "hint": "超时一次扣多少分。默认 25。",
         "obvious_hint": true
       },
       "fail_penalty": {
         "description": "失败扣分",
         "type": "int",
         "default": 12,
-        "hint": "一次普通失败（非超时）扣多少分（1~100，默认 12）。\n\n比如返回空内容、HTTP 5xx、解析失败这类。\n比超时扣得轻，因为不一定是模型的问题。",
+        "hint": "普通失败一次扣多少分。默认 12。",
         "obvious_hint": true
       },
       "recover_step": {
         "description": "成功加分",
         "type": "int",
         "default": 5,
-        "hint": "成功一次加多少分（1~100，默认 5）。\n\n故意加得慢：一次偶然成功不该立刻把分数冲回去，\n要连续稳定几次才能爬回高位。",
+        "hint": "成功一次加多少分。默认 5。",
         "obvious_hint": true
       },
       "initial_score": {
         "description": "初始分数",
         "type": "int",
         "default": 70,
-        "hint": "新目标（或重置后）的起始分（0~100，默认 70）。\n\n所有目标同分时，就按「优先级列表」的顺序决胜负 ——\n所以填了优先级列表的话，初始顺序仍然是你说了算。",
+        "hint": "新目标起始分。默认 70。",
         "obvious_hint": true
       },
       "cost_hint": {
@@ -331,7 +336,7 @@
         "type": "string",
         "default": "",
         "_special": "divider",
-        "hint": "这一层是**多个上游轮流用**，不是单一模型。\n\n**自动调节开着时**（默认）：\n  1. 按健康分排序（分数高的先试）\n  2. 同分按「优先级列表」顺序\n  3. 长期超时的自动沉底，成功一次 +5 分慢慢爬回来\n\n**怎么手动调整顺序**：\n  · 填「优先级列表」→ 同分时按你填的顺序\n  · 想强制排第一 → 把它填在列表最前面，并且关掉自动调节\n\n**怎么看当前实际顺序**：\n  GET /api/v1/plugins/extensions/astrbot_plugin_shim_connector/health?name=vision\n\n返回里 `rank` 是实际尝试顺序，`base_rank` 是你在配置里排的位置。\n两者不同 = 自动调节在起作用。",
+        "hint": "免费/收费模型清单见插件页「模型名册」，或看 SKILL.md。",
         "obvious_hint": true
       }
     }
@@ -345,7 +350,7 @@
         "description": "启用",
         "type": "bool",
         "default": false,
-        "hint": "本 shim 的开关。**最终启用 = 总闸 AND 这一项**（总闸关闭时这一项不生效）。\n\n改完保存后需要重启 AstrBot 才生效。\n\n想不重启就启停单个 shim：\n  POST /api/v1/plugins/extensions/astrbot_plugin_shim_connector/toggle\n  body: {\"name\":\"trae\"}\n  （需要面板登录态；插件页的热启停按钮走的也是这个接口）\n\n注意：通过 API 停用的 shim 只对本次运行有效，\n重启 AstrBot 后仍按这里的配置决定。",
+        "hint": "本 shim 开关。最终启用 = 总闸 AND 这一项。",
         "obvious_hint": true
       },
       "models": {
@@ -357,18 +362,19 @@
         "default": [
           "llm-pool-auto"
         ],
-        "hint": "通常保持默认的 llm-pool-auto 即可（虚拟模型名，内部轮换）。"
+        "hint": "要注册给 AstrBot 的模型名。"
       },
       "port": {
         "description": "端口",
         "type": "int",
-        "default": 8792
+        "default": 8792,
+        "hint": "本机监听端口，改完要重启该 shim。"
       },
       "token": {
         "description": "占位 Token",
         "type": "string",
         "default": "sk-llm-pool-local",
-        "hint": "插件与 shim 之间的认证口令，**两端自动同步，一般不用改**。\n\n它是干什么的：\n  1. 插件启动 shim 时，把它作为环境变量传给 shim（如 TRAE_SHIM_TOKEN）\n  2. shim 用它校验每个请求的 Bearer（只接受这个值）\n  3. 插件注册模型时，把同一个值填进 provider 的 key\n  两边必须一致，否则 AstrBot 调模型会被 shim 拒绝（401）。\n\n安全吗：\n  shim 只绑 127.0.0.1，这个 token 只在本机回环上生效。\n  它不是你的 WorkBuddy / Trae / Qoder 账号密钥，\n  改了也不影响客户端登录。\n\n什么时候需要改：\n  同机跑多套插件实例、需要区分时。否则保持默认即可。",
+        "hint": "插件与 shim 之间的口令，两端自动同步，不用改。",
         "obvious_hint": true
       },
       "strategy": {
@@ -385,7 +391,7 @@
             "value": "roundrobin"
           }
         ],
-        "hint": "**priority（推荐）**：严格按「优先级列表」顺序，前面的能用就一直用。\n  前面的冷却或连续失败达阈值，才退到下一个。\n  好处：固定用你最信任的模型，行为可预测。\n\n**roundrobin**：每次换下一个，均摊负载。\n  好处：不会把一个账号的额度用光。\n  坏处：每次换模型，输出风格会跳。",
+        "hint": "priority = 按优先级；roundrobin = 轮换均摊。",
         "obvious_hint": true
       },
       "priority": {
@@ -395,49 +401,49 @@
           "type": "string"
         },
         "default": [],
-        "hint": "**靠前的优先使用。** 留空 = 用内置默认顺序。\n\n填 provider id，一行一个，例如：\n  trae_shim/DeepSeek-V4-Flash-Official\n  trae_shim/Doubao-Seed-Code\n  workbuddy_shim/space-bunny\n\n怎么查 id：到「服务提供商」页看，格式是 <source_id>/<model>。\n没列进来的目标不会被使用（想用全部就把它们都列上）。",
+        "hint": "靠前的先用。留空用内置默认顺序。",
         "obvious_hint": true
       },
       "fail_threshold": {
         "description": "降级阈值",
         "type": "int",
         "default": 2,
-        "hint": "priority 模式下，某个目标**连续失败几次**就排到最后。\n\n  2（默认）—— 失败 2 次就降级，反应快\n  5 —— 更宽容，适合偶发超时的场景\n\n成功一次会自动重置计数。",
+        "hint": "连续失败几次降到最后。默认 2。",
         "obvious_hint": true
       },
       "auto_tune": {
         "description": "自动调节",
         "type": "bool",
         "default": true,
-        "hint": "**开着就会自己学**：长期超时/失败的模型自动沉到后面，好的浮上来。\n\n怎么算：\n  · 成功一次 +5 分\n  · 超时一次 -25 分（超时最伤，用户等不起）\n  · 其他失败 -12 分\n  · 分数 0~100，初始 70\n\n排序规则：按分数从高到低，同分按「优先级列表」的顺序。\n分数会存到文件，重启不丢。\n\n关掉的话就严格按「优先级列表」的固定顺序，不学习。",
+        "hint": "按健康分自动调整顺序：成功加分，失败/超时扣分。",
         "obvious_hint": true
       },
       "timeout_penalty": {
         "description": "超时扣分",
         "type": "int",
         "default": 25,
-        "hint": "一次超时扣多少分（1~100，默认 25）。\n\n扣得越狠，超时的模型沉得越快。\n如果上游本来就慢（比如视觉模型要 10-20 秒），可以调小到 10-15，\n避免正常慢但能用的模型被误判。",
+        "hint": "超时一次扣多少分。默认 25。",
         "obvious_hint": true
       },
       "fail_penalty": {
         "description": "失败扣分",
         "type": "int",
         "default": 12,
-        "hint": "一次普通失败（非超时）扣多少分（1~100，默认 12）。\n\n比如返回空内容、HTTP 5xx、解析失败这类。\n比超时扣得轻，因为不一定是模型的问题。",
+        "hint": "普通失败一次扣多少分。默认 12。",
         "obvious_hint": true
       },
       "recover_step": {
         "description": "成功加分",
         "type": "int",
         "default": 5,
-        "hint": "成功一次加多少分（1~100，默认 5）。\n\n故意加得慢：一次偶然成功不该立刻把分数冲回去，\n要连续稳定几次才能爬回高位。",
+        "hint": "成功一次加多少分。默认 5。",
         "obvious_hint": true
       },
       "initial_score": {
         "description": "初始分数",
         "type": "int",
         "default": 70,
-        "hint": "新目标（或重置后）的起始分（0~100，默认 70）。\n\n所有目标同分时，就按「优先级列表」的顺序决胜负 ——\n所以填了优先级列表的话，初始顺序仍然是你说了算。",
+        "hint": "新目标起始分。默认 70。",
         "obvious_hint": true
       },
       "cost_hint": {
@@ -445,7 +451,7 @@
         "type": "string",
         "default": "",
         "_special": "divider",
-        "hint": "这一层是**多个上游轮流用**，不是单一模型。\n\n**自动调节开着时**（默认）：\n  1. 按健康分排序（分数高的先试）\n  2. 同分按「优先级列表」顺序\n  3. 长期超时的自动沉底，成功一次 +5 分慢慢爬回来\n\n**怎么手动调整顺序**：\n  · 填「优先级列表」→ 同分时按你填的顺序\n  · 想强制排第一 → 把它填在列表最前面，并且关掉自动调节\n\n**怎么看当前实际顺序**：\n  GET /api/v1/plugins/extensions/astrbot_plugin_shim_connector/health?name=llm_pool\n\n返回里 `rank` 是实际尝试顺序，`base_rank` 是你在配置里排的位置。\n两者不同 = 自动调节在起作用。",
+        "hint": "免费/收费模型清单见插件页「模型名册」，或看 SKILL.md。",
         "obvious_hint": true
       }
     }
@@ -454,23 +460,30 @@
     "description": "高级设置",
     "type": "object",
     "items": {
+      "dependency_hint": {
+        "description": "⚠️ 前置依赖：需要 Node.js 18+",
+        "type": "string",
+        "default": "",
+        "_special": "divider",
+        "hint": "本插件的 5 个 shim 都是 Node 脚本，**没装 Node.js 就完全不能用**。\n\n装法：去 https://nodejs.org/ 下 LTS 版本 → 装完重启 AstrBot → 命令行 node -v 能出版本号即可。\n\nNode 装在非标准位置的话，到「高级设置 → Node.js 路径」填 node.exe 绝对路径。"
+      },
       "node_path": {
         "description": "Node.js 路径",
         "type": "string",
         "default": "",
-        "hint": "留空则自动从 PATH 查找，再退到标准安装位置（%ProgramFiles%\\nodejs、%LOCALAPPDATA%\\Programs\\nodejs、%NVM_HOME%）。\n\n如果装在非常规位置（如绿色版、其他盘），在这里填 node.exe 的完整路径。"
+        "hint": "留空自动查找。填了就用这个路径。"
       },
       "auto_register": {
         "description": "自动注册 Provider",
         "type": "bool",
         "default": true,
-        "hint": "关闭后只起 shim，不往 AstrBot 加 provider（适合你想手动配 api_base 的场景）"
+        "hint": "启动 shim 后自动把模型注册成 provider。"
       },
       "strict_models": {
         "description": "严格模式：只注册配置里的模型",
         "type": "bool",
         "default": true,
-        "hint": "开启（推荐）：配置了 models 就只注册那些；留空则注册全部。\n关闭：不管配置了什么，都注册 shim 返回的全部模型。"
+        "hint": "只注册配置里勾选的模型，忽略名册其余项。"
       }
     }
   }

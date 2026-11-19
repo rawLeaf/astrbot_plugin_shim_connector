@@ -991,7 +991,7 @@ async function importFromDshVault(dryRun = false, explicitPath = "") {
  * @returns {Promise<{imported, skipped, errors, details}>}
  */
 async function importFromDesktop(dryRun = false) {
-  const result = { imported: 0, skipped: 0, errors: [], details: [] };
+  const result = { imported: 0, skipped: 0, overwrite: 0, errors: [], details: [] };
 
   let key;
   try {
@@ -1053,6 +1053,7 @@ async function importFromDesktop(dryRun = false) {
           });
           continue;
         }
+        result.overwrite += 1;
         result.details.push({
           region,
           accountId,
@@ -1093,6 +1094,7 @@ async function importAllExternal(dryRun = false, explicitPath = "") {
     total: {
       imported: dsh.imported + desktop.imported,
       skipped: dsh.skipped + desktop.skipped,
+      overwrite: (dsh.overwrite || 0) + (desktop.overwrite || 0),
     },
     errors: [...dsh.errors, ...desktop.errors],
   };

@@ -569,6 +569,22 @@ class ShimConnector(Star):
             nvm = os.environ.get("NVM_HOME")
             if nvm:
                 out.append(str(Path(nvm) / "node.exe"))
+            # NVM for Windows 的 symlink 目录
+            nvm_sym = os.environ.get("NVM_SYMLINK")
+            if nvm_sym:
+                out.append(str(Path(nvm_sym) / "node.exe"))
+            # fnm / volta / scoop 这些常见版本管理器
+            if local:
+                out.append(str(Path(local) / "fnm_multishells" / "node.exe"))
+                out.append(str(Path(local) / "Volta" / "bin" / "node.exe"))
+            home = os.environ.get("USERPROFILE") or str(Path.home())
+            out.append(str(Path(home) / "scoop" / "apps" / "nodejs" / "current" / "node.exe"))
+            # 各盘符的 nodejs / tools\nodejs（便携版常见位置）
+            for letter in "CDEFGH":
+                root = letter + ":\\"
+                if Path(root).is_dir():
+                    out.append(str(Path(root) / "nodejs" / "node.exe"))
+                    out.append(str(Path(root) / "tools" / "nodejs" / "node.exe"))
         elif sys.platform == "darwin":
             out.append("/usr/local/bin/node")
             out.append("/opt/homebrew/bin/node")
@@ -576,6 +592,79 @@ class ShimConnector(Star):
             out.append("/usr/bin/node")
             out.append("/usr/local/bin/node")
         return out
+    def _node_diagnose(self) -> dict:
+        """诊断 Node.js 检测过程（供配置页/API 显示）。
+
+        2026-11-19：用户问「不能检测电脑上 node 吗」。
+        检测逻辑本来就有（配置路径 → PATH → 标准位置 → nvm），
+        但用户看不到「到底找了哪、为什么没找到」，所以加这个。
+
+        Returns:
+            含 found / path / version / searched / hint 的字典。
+        """
+        searched: list[dict] = []
+
+        # 1) 配置里指定的路径
+        section = self.config.get("advanced", {}) if isinstance(self.config, dict) else {}
+        custom = str(section.get("node_path") or "").strip()
+        if custom:
+            ok = Path(custom).is_file()
+            searched.append({"source": "配置项 node_path", "path": custom, "exists": ok})
+            if ok:
+                return self._node_diag_result(custom, searched)
+
+        # 2) PATH 里的 node
+        which = shutil.which("node")
+        searched.append({
+            "source": "系统 PATH",
+            "path": which or "(未找到)",
+            "exists": bool(which),
+        })
+        if which:
+            return self._node_diag_result(which, searched)
+
+        # 3) 标准安装位置
+        for cand in self._node_candidates():
+            ok = Path(cand).is_file()
+            searched.append({"source": "标准位置", "path": cand, "exists": ok})
+            if ok:
+                return self._node_diag_result(cand, searched)
+
+        return {
+            "found": False,
+            "path": None,
+            "version": None,
+            "searched": searched,
+            "hint": (
+                "没找到 Node.js。去 https://nodejs.org/ 装 LTS 版，"
+                "装完重启 AstrBot；如果装在非标准位置，"
+                "到「高级设置 → Node.js 路径」填 node.exe 完整路径。"
+            ),
+        }
+
+    @staticmethod
+    def _node_diag_result(path: str, searched: list[dict]) -> dict:
+        """拿到路径后，再跑一次 --version 确认能执行。"""
+        version = ""
+        try:
+            r = subprocess.run(
+                [path, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            version = (r.stdout or "").strip()
+        except Exception:  # noqa: BLE001
+            version = "(无法执行)"
+        return {
+            "found": True,
+            "path": path,
+            "version": version,
+            "searched": searched,
+            "hint": "" if version.startswith("v") else "文件存在但执行失败，可能不是有效的 node。",
+        }
+
     def _node_exe(self) -> str | None:
         """找 node 可执行文件。"""
         section = self.config.get("advanced", {}) if isinstance(self.config, dict) else {}
@@ -596,8 +685,21 @@ class ShimConnector(Star):
         """插件加载时：按配置起 shim 并注册 provider。"""
         node = self._node_exe()
         if node is None:
-            logger.warning(
-                "[shim_connector] 找不到 node，请安装 Node.js 或在配置里指定 node_path"
+            # 用 error 级别，因为这是「装了插件但完全不能用」的硬依赖缺失。
+            # 提示要能直接照做，不能只说「请安装 Node.js」。
+            logger.error(
+                "[shim_connector] ❌ 找不到 Node.js —— 本插件无法工作\n"
+                "\n"
+                "  这个插件必须依赖 Node.js 才能运行（5 个 shim 都是 Node 脚本）。\n"
+                "\n"
+                "  怎么办：\n"
+                "    1. 去 https://nodejs.org/ 下载 LTS 版本安装（要 18 或更高）\n"
+                "    2. 装完**重启 AstrBot**（当前进程读不到新的 PATH）\n"
+                "    3. 命令行跑 node -v 应该能看到版本号\n"
+                "\n"
+                "  如果已经装了但还是报这个：\n"
+                "    Node 可能装在非标准位置。到 插件配置 → 高级设置 → Node.js 路径\n"
+                "    填 node.exe 的完整路径，例如 C:\\Program Files\\nodejs\\node.exe"
             )
             return
 
@@ -2109,6 +2211,7 @@ class ShimConnector(Star):
             ("restart", self._api_restart, ["POST"], "重启指定 shim"),
             ("toggle", self._api_toggle, ["POST"], "切换指定 shim 启停"),
             ("refresh-models", self._api_refresh_models, ["POST"], "探测上游模型"),
+            ("node/check", self._api_node_check, ["GET"], "检测 Node.js 是否可用"),
             ("accounts/scan", self._api_accounts_scan, ["GET"], "扫描 vault 候选位置"),
             ("accounts", self._api_accounts, ["GET"], "列出账号"),
             ("accounts/current", self._api_accounts_current, ["GET"], "当前账号"),
@@ -3055,6 +3158,17 @@ class ShimConnector(Star):
             return await self._api_response({"ok": False, "message": str(exc)}, 400)
 
     # ── 账号管理（转发到 workbuddy shim）──────────────────────
+
+    async def _api_node_check(self):
+        """检查 Node.js 是否可用（配置页「检测 Node」按钮用）。"""
+
+        async def handler():
+            return {"ok": True, **self._node_diagnose()}
+
+        try:
+            return await self._api_response(await handler())
+        except Exception as exc:  # noqa: BLE001
+            return await self._api_response({"ok": False, "message": str(exc)}, 500)
 
     async def _api_accounts_scan(self):
         """扫描 vault 候选位置，返回「找过哪些地方」。

@@ -37,6 +37,7 @@
             <input type="checkbox" id="autoTune" />
             <span>自动调序</span>
           </label>
+          <button class="btn" id="checkNode" type="button" title="检查本机有没有装 Node.js">检测 Node</button>
           <button class="btn" id="scanVaults" type="button">检测本地账号</button>
           <button class="btn" id="refreshBalance" type="button" title="强制回源查余额，绕过 5 分钟缓存">刷新积分</button>
           <button class="btn primary" id="addAccount" type="button" title="仅 WorkBuddy / CodeBuddy 支持扫码登录">WorkBuddy 扫码添加</button>
@@ -256,6 +257,7 @@
         </span>
       </p>
 
+      <div class="scan-status" id="nodeStatus" hidden></div>
       <div class="scan-status" id="scanStatus">扫描中…</div>
       <div class="scan-list" id="scanList"></div>
 

@@ -531,6 +531,49 @@ async function testAccount(accountId, region, btn) {
 
 /* ---------- 检测与导入 ---------- */
 
+/** 检测本机 Node.js（2026-11-19 新增）。
+ *
+ * 用户问「不能检测电脑上 node 吗」—— 检测逻辑本来就有，
+ * 但结果只在日志里，用户看不到。这里做成按钮，直接显示：
+ * 找到了哪个路径、版本号多少、没找到时找过哪些地方。
+ */
+async function checkNode() {
+  const btn = q("#checkNode");
+  const out = q("#nodeStatus");
+  const old = btn ? btn.textContent : "";
+  if (btn) { btn.disabled = true; btn.textContent = "检测中…"; }
+  if (out) { out.hidden = false; out.innerHTML = "检测中…"; }
+
+  try {
+    const r = await apiGet("node/check");
+    if (r.found) {
+      const ver = r.version && r.version.startsWith("v") ? r.version : "(版本未知)";
+      const rows = (r.searched || [])
+        .map(x => `<div style="font-size:12px;color:var(--dim)">${x.exists ? "✅" : "❌"} ${x.source}：<code>${x.path}</code></div>`)
+        .join("");
+      out.innerHTML =
+        `<span style="color:var(--ok)">✓ 找到 Node.js ${ver}</span>` +
+        `<br><code style="font-size:12px">${r.path}</code>` +
+        (rows ? "<br>" + rows : "");
+      notice(`Node.js ${ver} 可用`, "ok", 4000);
+    } else {
+      const rows = (r.searched || [])
+        .map(x => `<div style="font-size:12px;color:var(--dim)">❌ ${x.source}：<code>${x.path}</code></div>`)
+        .join("");
+      out.innerHTML =
+        '<span style="color:var(--err)">✗ 没找到 Node.js</span>'
+        + '<br><span style="font-size:13px">' + (r.hint || "") + "</span>"
+        + (rows ? "<br><br>" + rows : "");
+      notice("没找到 Node.js，点开看详情", "err", 8000);
+    }
+  } catch (e) {
+    if (out) out.innerHTML = '<span style="color:var(--err)">检测失败：' + e.message + "</span>";
+    notice("检测失败：" + e.message, "err", 6000);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = old; }
+  }
+}
+
 async function openScanModal() {
   q("#scanModal").hidden = false;
   q("#scanStatus").textContent = "扫描中…";
@@ -616,6 +659,29 @@ function renderScanList(candidates) {
   });
 }
 
+/**
+ * 从结果里抽出「新增 / 跳过 / 覆盖 / 失败」四个数。
+ *
+ * 2026-11-19 修复：后端三种 source 返回结构不一样：
+ *   source=all     → { total: {imported, skipped}, dshVault:{...}, desktop:{...} }
+ *   source=desktop → { desktop: { imported, skipped, details } }   ← 没有 total
+ *   source=dsh     → { dshVault: { imported, skipped, details } }  ← 没有 total
+ * 原来前端只读 r.total，后两种永远是 undefined，界面显示「新增 0 个」，
+ * 用户以为导入失败。
+ */
+function summarizeImport(r) {
+  const parts = [r.total, r.desktop, r.dshVault].filter(Boolean);
+  if (parts.length === 0) return { imported: 0, skipped: 0, overwrite: 0, errors: 0 };
+  const sum = { imported: 0, skipped: 0, overwrite: 0, errors: 0 };
+  for (const p of parts) {
+    sum.imported += Number(p.imported || 0);
+    sum.skipped += Number(p.skipped || 0);
+    sum.overwrite += Number(p.overwrite || 0);
+    sum.errors += (Array.isArray(p.errors) ? p.errors.length : 0);
+  }
+  return sum;
+}
+
 async function doImport(vaultPath, btn) {
   const old = btn ? btn.textContent : "";
   if (btn) { btn.disabled = true; btn.textContent = "导入中…"; }
@@ -623,16 +689,36 @@ async function doImport(vaultPath, btn) {
     const body = { shim: state.accountShim };
     if (vaultPath) body.path = vaultPath;
     const r = await apiPost("accounts/import", body);
-    const t = r.total || {};
-    notice(`导入完成：新增 ${t.imported || 0} 个，跳过 ${t.skipped || 0} 个`, "ok", 5000);
+
+    const s = summarizeImport(r);
+
+    // 导入 0 个时，把后端给的原因也显示出来，别让用户猜
+    if (s.imported === 0 && s.overwrite === 0) {
+      const detail = [];
+      for (const p of [r.total, r.desktop, r.dshVault].filter(Boolean)) {
+        for (const d of (p.details || [])) {
+          if (d.action === "skip" && d.reason) detail.push(d.reason);
+        }
+        for (const e of (p.errors || [])) detail.push(String(e));
+      }
+      const why = detail.length ? detail.slice(0, 2).join("；") : "没找到可导入的账号";
+      notice("没有新增账号：" + why, "warn", 8000);
+    } else {
+      const bits = [`新增 ${s.imported} 个`];
+      if (s.overwrite) bits.push(`更新 ${s.overwrite} 个`);
+      if (s.skipped) bits.push(`跳过 ${s.skipped} 个`);
+      if (s.errors) bits.push(`失败 ${s.errors} 个`);
+      notice("导入完成：" + bits.join("，"), "ok", 6000);
+    }
+
     await loadAccounts();
     // 重新扫描以更新状态
     if (!q("#scanModal").hidden) {
-      const s = await apiGet("accounts/scan", { shim: state.accountShim });
-      renderScanList(s.candidates || []);
+      const sc = await apiGet("accounts/scan", { shim: state.accountShim });
+      renderScanList(sc.candidates || []);
     }
   } catch (e) {
-    notice("导入失败：" + e.message, "err");
+    notice("导入失败：" + e.message, "err", 8000);
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = old; }
   }

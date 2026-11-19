@@ -7,6 +7,102 @@
 
 ---
 
+## [1.7.8] — 2026-11-19
+
+### 修复：导入账号成功但界面显示「新增 0 个」
+
+用户反馈：在其他电脑上导入，明明扫描到了账号、点了「导入这里」，
+但账号没进插件。
+
+#### 根因：前端读错了返回字段
+
+后端三种 `source` 返回结构不同：
+
+| source | 返回 | 有 `total` 吗 |
+|---|---|---|
+| `all` | `{ total: {imported, skipped}, dshVault, desktop }` | ✅ |
+| `desktop` | `{ desktop: { imported, skipped, details } }` | ❌ |
+| `dsh` | `{ dshVault: { imported, skipped, details } }` | ❌ |
+
+前端 `doImport` 只读 `r.total.imported`，后两种永远是 `undefined`，
+于是显示「新增 0 个，跳过 0 个」—— 用户以为导入失败。
+
+#### 修复
+
+**1. 前端新增 `summarizeImport()`**
+
+合并三种结构，累加 `imported` / `skipped` / `overwrite` / `errors`：
+
+```javascript
+const parts = [r.total, r.desktop, r.dshVault].filter(Boolean);
+```
+
+**2. 导入 0 个时说明原因**
+
+原来只说「新增 0 个」，现在把后端 `details` 里的 `reason` 和
+`errors` 显示出来：
+
+```
+没有新增账号：vault 里的更晚（2027-11-10 >= 2027-11-10）
+```
+
+**3. shim 补 `overwrite` 计数**
+
+`importFromDesktop` 原来只统计 `imported` / `skipped`，
+覆盖已有账号的情况混在 `imported` 里。现在单独统计，
+`importAllExternal` 的 `total` 也带上。
+
+---
+
+### 新增：页面「检测 Node」按钮
+
+用户问「不能检测电脑上 node 吗」。
+
+检测逻辑本来就有（配置路径 → PATH → 标准位置 → 版本管理器），
+但结果只写日志，用户看不到。现在做成按钮：
+
+**找到时**：
+
+```
+✓ 找到 Node.js v24.21.0
+D:\3other\nodejs\node.EXE
+✅ 系统 PATH：D:\3other\nodejs\node.EXE
+```
+
+**没找到时**，列出找过的每个位置：
+
+```
+✗ 没找到 Node.js
+去 https://nodejs.org/ 装 LTS 版，装完重启 AstrBot...
+
+❌ 配置项 node_path：(空)
+❌ 系统 PATH：(未找到)
+❌ 标准位置：C:\Program Files\nodejs\node.exe
+```
+
+#### 新增 API
+
+```
+GET /api/v1/plugins/extensions/astrbot_plugin_shim_connector/node/check
+```
+
+返回 `{found, path, version, searched[], hint}`。
+
+#### 扩展 Node 搜索路径
+
+原来只查 PATH + 标准安装位置。用户本机 Node 装在
+`D:\3other\nodejs\`（非标准位置），全靠 PATH 才找到。
+
+补了 17 个搜索点：
+
+- nvm：`NVM_HOME` / `NVM_SYMLINK`
+- fnm、volta、scoop
+- 各盘符的 `<盘>:\nodejs\node.exe` 和 `<盘>:\tools\nodejs\node.exe`
+
+这样即使 AstrBot 以服务/计划任务方式启动、PATH 不完整，也能找到。
+
+---
+
 ## [1.7.7] — 2026-11-18
 
 ### 合规修复：账号凭据改存 plugin_data（评审要求）
