@@ -880,7 +880,7 @@ WorkBuddy（腾讯 CodeBuddy） / Trae（字节） / Qoder（阿里）的服务�
 ---
 ## 变更日志
 
-当前版本 **1.7.9** —— 完整变更见 [CHANGELOG.md](CHANGELOG.md)。
+当前版本 **1.7.10** —— 完整变更见 [CHANGELOG.md](CHANGELOG.md)。
 
 ---
 

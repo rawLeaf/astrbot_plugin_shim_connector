@@ -189,6 +189,7 @@ class ShimConnector(Star):
         self._cfg_mtime: float = 0.0
         self._cfg_watch_task: asyncio.Task | None = None
         self._watchdog_task: asyncio.Task | None = None
+        self._startup_compensate_task: asyncio.Task | None = None
 
         # ⚠️ 2026-11-13 关键修复：Popen 对象被 GC 会杀掉子进程。
         #
@@ -861,6 +862,21 @@ class ShimConnector(Star):
             self._watchdog_task = asyncio.create_task(self._watchdog_loop())
             logger.info("[shim_connector] 看门狗已启动（间隔 30s）")
 
+        # 启动补偿（2026-11-20）
+        #
+        # 用户反馈：装完插件、还没重启 AstrBot 时，点导入会报
+        # 「本地模型服务还没启动」。原因是 initialize 只在插件加载那一刻
+        # 跑一次，如果那时配置还没就绪（或 shim 还在慢启动），
+        # 之后就没有任何东西再主动拉起了 —— 看门狗要等 30 秒。
+        #
+        # 这里加一个短延迟补偿：15 秒后再过一遍，
+        # 把「配置启用但没在跑」的 shim 全部拉起来。
+        # 只做一次，不常驻（常驻是看门狗的活）。
+        if getattr(self, "_startup_compensate_task", None) is None:
+            self._startup_compensate_task = asyncio.create_task(
+                self._startup_compensate()
+            )
+
     def _pid_alive(self, pid: int) -> bool:
         """判断某个进程是否还活着（Windows / POSIX 通用）。"""
         if pid <= 0:
@@ -894,6 +910,53 @@ class ShimConnector(Star):
             return {str(k): int(v) for k, v in raw.items() if str(v).isdigit()}
         except Exception:  # noqa: BLE001
             return {}
+
+    async def _startup_compensate(self) -> None:
+        """插件加载后 15 秒补偿一次：把配置启用但没在跑的 shim 全部拉起。
+
+        解决「装完插件没重启 AstrBot，shim 一直没起」的问题。
+        只跑一次；之后靠看门狗。
+        """
+        try:
+            await asyncio.sleep(15.0)
+            if not self._master_enabled():
+                return
+            node = self._node_exe()
+            if node is None:
+                return
+            fixed = []
+            for name in self._all_defs():
+                if not self._effective_enabled(name):
+                    continue
+                port = self._port(name)
+                if not await port_free_async(port):
+                    continue          # 在跑，跳过
+                logger.info(
+                    f"[shim_connector] 启动补偿：{name} (:{port}) 配置启用但没在跑，拉起"
+                )
+                async with self._lock:
+                    ok = await self._start_shim(name, node, reuse_ok=True)
+                if ok:
+                    fixed.append(name)
+            if fixed:
+                logger.info(
+                    f"[shim_connector] 启动补偿完成，拉起 {len(fixed)} 个："
+                    + ", ".join(fixed)
+                )
+                # 等它们 listen 后注册 provider
+                await asyncio.sleep(3.0)
+                if self._auto_register():
+                    for name in fixed:
+                        try:
+                            await self._register_provider(name)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning(
+                                f"[shim_connector] 补偿后注册 {name} 失败: {exc}"
+                            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[shim_connector] 启动补偿异常: {exc}")
 
     async def _watchdog_loop(self) -> None:
         """每 30 秒检查一次：配置里启用、但端口没在听的 shim，自动拉起。
@@ -1026,6 +1089,15 @@ class ShimConnector(Star):
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
         self._watchdog_task = None
+
+        comp = getattr(self, "_startup_compensate_task", None)
+        if comp is not None and not comp.done():
+            comp.cancel()
+            try:
+                await comp
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        self._startup_compensate_task = None
 
         # 记录仍在运行的 shim：名字 -> 当时的端口
         # 为什么要记端口：用户可能改了端口再保存，
@@ -2211,6 +2283,7 @@ class ShimConnector(Star):
             ("restart", self._api_restart, ["POST"], "重启指定 shim"),
             ("toggle", self._api_toggle, ["POST"], "切换指定 shim 启停"),
             ("refresh-models", self._api_refresh_models, ["POST"], "探测上游模型"),
+            ("start-all", self._api_start_all, ["POST"], "一键启动所有启用的 shim"),
             ("node/check", self._api_node_check, ["GET"], "检测 Node.js 是否可用"),
             ("accounts/scan", self._api_accounts_scan, ["GET"], "扫描 vault 候选位置"),
             ("accounts", self._api_accounts, ["GET"], "列出账号"),
@@ -2353,6 +2426,52 @@ class ShimConnector(Star):
             )
         return name
 
+    async def _ensure_shim_running(self, name: str) -> None:
+        """确保某个 shim 正在运行；没运行就拉起来。
+
+        用于那些「本该纯本地操作、却要转发给 shim」的接口
+        （如账号导入）。用户刚装插件时 shim 可能还没起，
+        不该让导入因此失败。
+
+        Args:
+            name: shim 名。
+
+        Raises:
+            RuntimeError: 启动失败时抛出，带可操作提示。
+        """
+        port = self._port(name)
+        # 已在监听 → 直接复用
+        if not await port_free_async(port):
+            return
+        node = self._node_exe()
+        if node is None:
+            raise RuntimeError(
+                f"{name} 未运行，且找不到 Node.js 无法自动启动。"
+                f"请先装 Node.js 18+（https://nodejs.org/）后重启 AstrBot。"
+            )
+        logger.info(f"[shim_connector] {name} 未运行，导入前自动启动")
+        ok = await self._start_shim(name, node)
+        if not ok:
+            logger.error(
+                f"[shim_connector] {name} 自动启动失败（node={node}）。"
+                f"常见原因：端口被占、脚本缺失、Node 版本过低。"
+                f"详细报错看 {self._log_path(name)}"
+            )
+            raise RuntimeError(
+                f"本地模型服务（{name}）启动失败。\n"
+                f"Node.js 已找到：{node}\n"
+                f"详细原因看日志：{self._log_path(name)}\n"
+                f"也可以到「扩展功能 → 本机模型接入」手动点 {name} 的「启动」看报错。"
+            )
+        # 等它 listen
+        for _ in range(20):
+            await asyncio.sleep(0.5)
+            if not await port_free_async(port):
+                return
+        raise RuntimeError(
+            f"{name} 启动后 10 秒内未监听端口 {port}，看插件日志排查。"
+        )
+
     async def _do_start(self, name: str) -> str:
         """启动单个 shim（不写配置，不影响其他 shim）。"""
         self._require_name(name)
@@ -2486,12 +2605,12 @@ class ShimConnector(Star):
             self._require_name(name)
             do_register = body.get("register", True) is not False
 
-            port = self._port(name)
-            if await port_free_async(port):
-                raise RuntimeError(
-                    f"{name} 未在运行（端口 {port} 空闲），请先启动它再刷新"
-                )
+            # 刷新名册也自动拉起（2026-11-20）：
+            # 用户点「刷新」是想同步最新模型列表，
+            # 不该因为服务没启动就报「端口空闲」这种看不懂的错。
+            await self._ensure_shim_running(name)
 
+            port = self._port(name)
             token = self._token(name)
 
             # 拉官方名册（三家都有 /v3/models）
@@ -2589,9 +2708,21 @@ class ShimConnector(Star):
         port = self._port(name)
         if await port_free_async(port):
             raise RuntimeError(
-                f"{name} 未在运行（端口 {port} 空闲）。"
-                f"到「扩展功能 → 本机模型接入」点该 shim 的启动，"
-                f"或用 /shim start 指令拉起。"
+                # 2026-11-20 用户反馈这条报错「莫名其妙」：
+                # 弹窗里明明写着「找到 2 个账号，可以导入」，
+                # 一点却冒出「workbuddy 未在运行（端口 8787 空闲）」——
+                # 用户不知道 shim 是什么、端口是什么。
+                #
+                # 新文案只讲用户能理解的：
+                #   发生了什么（本地模型服务没启动）
+                #   为什么（通常刚装完还没启动过）
+                #   怎么办（自动重试 / 手动启动 / 检查 Node）
+                f"本地模型服务（{name}）还没启动，这次操作没法完成。\n"
+                f"通常是刚装完插件、服务还没起来 —— 再点一次通常就好了。\n"
+                f"如果反复失败：\n"
+                f"  · 到「扩展功能 → 本机模型接入」点一下 {name} 的「启动」\n"
+                f"  · 或在聊天里发 /shim start\n"
+                f"  · 如果是全新电脑，先确认装了 Node.js（点页面上的「检测 Node」）"
             )
 
         url = f"http://127.0.0.1:{port}{path}"
@@ -2627,9 +2758,21 @@ class ShimConnector(Star):
         port = self._port(name)
         if await port_free_async(port):
             raise RuntimeError(
-                f"{name} 未在运行（端口 {port} 空闲）。"
-                f"到「扩展功能 → 本机模型接入」点该 shim 的启动，"
-                f"或用 /shim start 指令拉起。"
+                # 2026-11-20 用户反馈这条报错「莫名其妙」：
+                # 弹窗里明明写着「找到 2 个账号，可以导入」，
+                # 一点却冒出「workbuddy 未在运行（端口 8787 空闲）」——
+                # 用户不知道 shim 是什么、端口是什么。
+                #
+                # 新文案只讲用户能理解的：
+                #   发生了什么（本地模型服务没启动）
+                #   为什么（通常刚装完还没启动过）
+                #   怎么办（自动重试 / 手动启动 / 检查 Node）
+                f"本地模型服务（{name}）还没启动，这次操作没法完成。\n"
+                f"通常是刚装完插件、服务还没起来 —— 再点一次通常就好了。\n"
+                f"如果反复失败：\n"
+                f"  · 到「扩展功能 → 本机模型接入」点一下 {name} 的「启动」\n"
+                f"  · 或在聊天里发 /shim start\n"
+                f"  · 如果是全新电脑，先确认装了 Node.js（点页面上的「检测 Node」）"
             )
 
         url = f"http://127.0.0.1:{port}{path}"
@@ -3159,6 +3302,91 @@ class ShimConnector(Star):
 
     # ── 账号管理（转发到 workbuddy shim）──────────────────────
 
+    async def _api_start_all(self):
+        """一次性启动所有「配置里启用」的 shim。
+
+        2026-11-20 用户要求：「设置也需要给一个启动 shim 的按钮」。
+
+        AstrBot 原生配置页没法加按钮，所以在插件页面（账号池顶部）
+        提供一个「启动全部」按钮，调这个接口。
+
+        只启动 _effective_enabled 为真的那些，跟 /shim start 指令一致。
+        已运行的会复用，不会重启。
+        """
+
+        async def handler():
+            node = self._node_exe()
+            if node is None:
+                raise RuntimeError(
+                    "找不到 Node.js，无法启动。"
+                    "去 https://nodejs.org/ 装 LTS 版后重启 AstrBot。"
+                )
+
+            started = []
+            reused = []
+            failed = []
+
+            for name in self._all_defs():
+                if not self._effective_enabled(name):
+                    continue
+                port = self._port(name)
+                if not await port_free_async(port):
+                    reused.append(name)
+                    continue
+                try:
+                    async with self._lock:
+                        ok = await self._start_shim(name, node, reuse_ok=True)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"[shim_connector] 启动 {name} 异常: {exc}")
+                    ok = False
+                (started if ok else failed).append(name)
+
+            # 等 listen 后注册 provider
+            if started:
+                await asyncio.sleep(3.0)
+                if self._auto_register():
+                    for name in started:
+                        try:
+                            await self._register_provider(name)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning(
+                                f"[shim_connector] 注册 {name} 失败: {exc}"
+                            )
+
+            logger.info(
+                f"[shim_connector] 一键启动：新起 {len(started)} 个"
+                f"（{', '.join(started) or '无'}），"
+                f"复用 {len(reused)} 个"
+                f"（{', '.join(reused) or '无'}）"
+                + (f"，失败 {len(failed)} 个（{', '.join(failed)}）" if failed else "")
+            )
+
+            if failed and not started:
+                msg = "启动失败：" + ", ".join(failed) + "。看插件日志排查。"
+            elif failed:
+                msg = (
+                    f"已启动 {len(started)} 个，复用 {len(reused)} 个，"
+                    f"失败 {len(failed)} 个（{', '.join(failed)}）"
+                )
+            else:
+                msg = (
+                    f"已启动 {len(started)} 个，复用 {len(reused)} 个"
+                    if started else f"{len(reused)} 个本来就在运行"
+                )
+
+            return {
+                "ok": True,
+                "started": started,
+                "reused": reused,
+                "failed": failed,
+                "message": msg,
+            }
+
+        try:
+            return await self._api_response(await handler())
+        except (ValueError, RuntimeError) as exc:
+            return await self._api_response({"ok": False, "message": str(exc)}, 400)
+
     async def _api_node_check(self):
         """检查 Node.js 是否可用（配置页「检测 Node」按钮用）。"""
 
@@ -3472,6 +3700,7 @@ class ShimConnector(Star):
                         force = "&refresh=1"
                 except Exception:  # noqa: BLE001
                     pass
+            await self._ensure_shim_running(shim)
             data = await self._proxy_shim(shim, f"/accounts?region={region}{force}")
             return {"ok": True, "shim": shim, "region": region, **data}
 
@@ -3485,6 +3714,8 @@ class ShimConnector(Star):
 
         async def handler():
             shim = self._account_shim()
+            await self._ensure_shim_running(shim)
+
             data = await self._proxy_shim(shim, "/accounts/current")
             return {"ok": True, **data}
 
@@ -3510,6 +3741,17 @@ class ShimConnector(Star):
             shim = self._account_shim(body)
             payload["region"] = self._account_region(
                 shim, str(body.get("region") or "cn"))
+
+            # 导入前确保 shim 在跑。
+            #
+            # 2026-11-20 用户反馈：扫描能看到账号（本地扫描已修），
+            # 但点「导入这里」报「workbuddy 未在运行（端口 8787 空闲）」。
+            # 和当初扫描的问题同类 —— 导入是纯本地文件搬运，
+            # 却要求 shim 活着。用户刚装插件、shim 可能还没起。
+            #
+            # 这里自动拉起一次：已运行则复用，没运行则启动。
+            await self._ensure_shim_running(shim)
+
             data = await self._proxy_shim_post(shim, "/accounts/import", payload)
             total = data.get("total") or {}
             logger.info(
@@ -3533,6 +3775,7 @@ class ShimConnector(Star):
                 raise ValueError("缺少 accountId")
             shim = self._account_shim(body)
             region = self._account_region(shim, str(body.get("region") or "cn"))
+            await self._ensure_shim_running(shim)
             data = await self._proxy_shim_post(
                 shim,
                 "/accounts/switch",
@@ -3556,6 +3799,7 @@ class ShimConnector(Star):
                 raise ValueError("缺少 accountId")
             shim = self._account_shim(body)
             region = self._account_region(shim, str(body.get("region") or "cn"))
+            await self._ensure_shim_running(shim)
             data = await self._proxy_shim_post(
                 shim,
                 "/accounts/delete",
@@ -3584,6 +3828,7 @@ class ShimConnector(Star):
             if body.get("model"):
                 payload["model"] = str(body["model"])
             shim = self._account_shim(body)
+            await self._ensure_shim_running(shim)
             data = await self._proxy_shim_post(shim, "/accounts/test", payload)
             logger.info(
                 f"[shim_connector] 测试账号 {account_id[:12]}: "

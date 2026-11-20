@@ -531,6 +531,37 @@ async function testAccount(accountId, region, btn) {
 
 /* ---------- 检测与导入 ---------- */
 
+/** 一键启动所有配置启用的 shim（2026-11-20）。
+ *
+ * 用户要求「设置也需要给一个启动 shim 的按钮」。
+ * 场景：装完插件没重启 AstrBot，或手动停了某些 shim，想一次全拉起来。
+ */
+async function startAllShims() {
+  const btn = q("#startAllShims");
+  const old = btn ? btn.textContent : "";
+  if (btn) { btn.disabled = true; btn.textContent = "启动中…"; }
+
+  try {
+    const r = await apiPost("start-all", {});
+    if (r.ok) {
+      const bits = [];
+      if (r.started?.length) bits.push("启动 " + r.started.length + " 个");
+      if (r.reused?.length) bits.push("复用 " + r.reused.length + " 个");
+      if (r.failed?.length) bits.push("失败 " + r.failed.length + " 个");
+      const msg = bits.length ? bits.join("，") : "没有需要启动的 shim";
+      notice(msg + (r.failed?.length ? "：" + r.failed.join(", ") : ""), r.failed?.length ? "warn" : "ok", 6000);
+      // 刷新状态
+      await loadAccounts();
+    } else {
+      notice("启动失败：" + (r.message || "未知错误"), "err", 8000);
+    }
+  } catch (e) {
+    notice("启动失败：" + e.message, "err", 8000);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = old; }
+  }
+}
+
 /** 检测本机 Node.js（2026-11-19 新增）。
  *
  * 用户问「不能检测电脑上 node 吗」—— 检测逻辑本来就有，
