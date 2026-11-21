@@ -7,6 +7,133 @@
 
 ---
 
+## [1.7.11] — 2026-11-21
+
+### 新增：llm_pool 支持 Anthropic Messages 协议
+
+部分上游模型在 Anthropic Messages 协议下**快一个数量级**。
+
+#### 实测数据
+
+同一模型 `Sage-A1.5`、同一段提示词、带 tools：
+
+| 协议 | 端点 | 耗时 |
+|---|---|---|
+| OpenAI Chat | `{base}/chat/completions` | 6295 ms |
+| **Anthropic Messages** | `{base}/messages` | **631~879 ms** |
+
+**快约 10 倍。**
+
+但不是所有模型都受益：
+
+| 模型 | OpenAI Chat | Anthropic | 是否建议开 |
+|---|---|---|---|
+| `Sage-A1.5` | 6295 ms | **879 ms** | ✅ |
+| `Sage-S2.1-Flash` | 3166 ms | 约 1600 ms | ✅ |
+| `intern-s2` | 3738 ms | 16093 ms | ❌ 更慢 4 倍 |
+| `intern_ds_flash` | 429 TPM | 429 TPM | ❌ 协议无关 |
+| `Sage-A1.5-Taiyi` | 不支持 tools | 不支持 tools | ❌ 都不行 |
+
+所以必须**逐目标配置**，不能全局一刀切。
+
+#### 配置方式
+
+插件配置 → 通用 LLM 池 → **协议（逐目标）**：
+
+```
+intern_source/Sage-A1.5=anthropic,intern_source/Sage-S2.1-Flash=anthropic
+```
+
+格式 `目标id=协议`，逗号分隔。**用完整 provider id，不是模型名。**
+
+留空 = 全部走 OpenAI，行为与旧版完全一致。
+
+#### 实现要点
+
+**请求转换**（`toAnthropicMessages`）：
+
+1. `system` 必须提到顶层 —— 放进 `messages` 会 400
+2. `messages` 必须 user/assistant 严格交替 —— 连续同 role 要合并
+3. `tool_calls` → `tool_use` block，`tool` 消息 → `tool_result` block
+4. `tools` 去掉 `type`/`function` 包装，`parameters` → `input_schema`
+5. `max_tokens` 必填（OpenAI 可省略）
+
+**响应转换**（`fromAnthropicResponse`）：
+
+1. **`thinking` block 必须丢弃** —— 否则思考过程会被当正文发给用户
+2. 多个 `text` block 拼接
+3. `tool_use` → OpenAI 的 `tool_calls`
+4. `stop_reason` → `finish_reason` 映射
+
+| Anthropic | OpenAI | 说明 |
+|---|---|---|
+| `end_turn` | `stop` | |
+| `tool_use` | **`tool_calls`** | 漏了这行 AstrBot 不会执行工具 |
+| `max_tokens` | `length` | |
+| `stop_sequence` | `stop` | |
+
+#### thinking-only 检测
+
+`Sage-A1.5` 是推理模型，`max_tokens` 给小了会 100% 消耗在思考上，正文一个字都出不来：
+
+```json
+{"content":[{"type":"thinking","thinking":"Thinking Process:..."}],
+ "stop_reason":"max_tokens","usage":{"output_tokens":100}}
+```
+
+**没有 `type: "text"` 的 block，正文完全缺失。**
+
+现在这种情况明确报错，而不是含糊的 `empty content`：
+
+```
+改前：HTTP200 empty content
+改后：HTTP200 thinking only (max_tokens too small)
+```
+
+`max_tokens` 默认值也从 4096 提到 **8192**。
+
+#### 实测验证
+
+```
+纯文本（max_tokens=2000）  HTTP 200  2346ms  content="\n\n2"  finish=stop
+                            usage={prompt:25, completion:243, total:268}
+
+带 tools（max_tokens=2000） HTTP 200   659ms  finish=tool_calls
+                            tool_calls=[{"name":"get_weather","arguments":"{\"city\":\"北京\"}"}]
+```
+
+单元测试 11/11 通过。
+
+---
+
+### 修复：`proto_map` 配置项缺失
+
+`main.py` 的 `_pool_proto_map()` 早就在读 `llm_pool.proto_map`，
+但 `_conf_schema.json` 里没这个项 —— 用户在 WebUI 配置页看不到、填不了。
+
+已补上配置项。
+
+---
+
+### 其它
+
+- `.gitignore` 加 `*.bak-*`（原来只忽略 `*.bak`，带时间戳的备份会被误提交）
+
+---
+
+### 生效方式
+
+**必须重启 llm_pool shim，光 reload 插件不够。**
+
+`LLM_POOL_PROTO` 是启动 shim 时通过环境变量注入的，reload 插件不会重新注入。
+
+```
+POST /api/plug/astrbot_plugin_shim_connector/stop   {"name":"llm_pool"}
+POST /api/plug/astrbot_plugin_shim_connector/start  {"name":"llm_pool"}
+```
+
+---
+
 ## [1.7.10] — 2026-11-20
 
 ### 新增：页面「启动全部」按钮

@@ -227,6 +227,37 @@ const TARGET_IDS =
     ? TARGETS_ENV.split(",").map((s) => s.trim()).filter(Boolean)
     : DEFAULT_TARGET_IDS;
 
+/* ── 每目标的协议（2026-11-21）────────────────────────────────
+ * 默认 openai（/chat/completions），可切成 anthropic（/messages）。
+ *
+ * 为什么要按目标分开：实测同一个模型 Sage-A1.5 带 tools 时，
+ * Anthropic Messages 879ms vs OpenAI Chat 6295ms（快 7 倍）；
+ * 但 intern-s2 反过来（3738ms vs 16093ms）。所以只能逐目标配，
+ * 不能全局一刀切。
+ *
+ * 环境变量格式：id=proto,id=proto
+ *   LLM_POOL_PROTO="Sage-A1.5=anthropic,Sage-S2.1-Flash=anthropic"
+ *
+ * 不设时行为与旧版完全一致（全部走 openai）。
+ * ──────────────────────────────────────────────────────── */
+const PROTO_ENV = process.env.LLM_POOL_PROTO ?? "";
+const TARGET_PROTO = Object.fromEntries(
+  PROTO_ENV.split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((s) => {
+      const i = s.indexOf("=");
+      return i > 0 ? [s.slice(0, i).trim(), s.slice(i + 1).trim().toLowerCase()] : null;
+    })
+    .filter(Boolean),
+);
+
+/** 取某目标该用的协议。 */
+function protoOf(id) {
+  const v = TARGET_PROTO[id];
+  return v === "anthropic" ? "anthropic" : "openai";
+}
+
 // ── 自动调节（health score）─────────────────────────────────
 //
 // 每个目标维护一个健康分（0~100），每次调用后调整：
@@ -318,6 +349,8 @@ function loadTargets() {
       base: String(s.api_base).replace(/\/$/, ""),
       model: p.model ?? id,
       key: keys[0] ?? "",
+      /** 该目标走的协议："openai" | "anthropic"（2026-11-21）。 */
+      proto: protoOf(id),
       cooldownUntil: 0,
       okCount: 0,
       failCount: 0,
@@ -408,27 +441,320 @@ function usable(payload) {
   }
 }
 
-async function tryOne(t, bodyObj, signal) {
-  const upstream = await fetch(t.base + "/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: "Bearer " + t.key,
+/* ── Anthropic Messages 协议转换（2026-11-21）─────────────────
+ *
+ * 只做「够用」的转换，不追求全字段覆盖。核心是四件事：
+ *   1. system 提到顶层（放进 messages 会 400）
+ *   2. 相邻同 role 合并（Anthropic 要求 user/assistant 严格交替）
+ *   3. tools 去掉 type/function 包装，parameters → input_schema
+ *   4. 响应的 thinking block 必须丢弃（否则思考过程会被当正文发给用户）
+ * ──────────────────────────────────────────────────────── */
+
+/** 安全 JSON.parse，失败给兜底值。 */
+function safeJsonParse(s, fallback) {
+  try {
+    const v = JSON.parse(s);
+    return v === null || v === undefined ? fallback : v;
+  } catch {
+    return fallback;
+  }
+}
+
+/** content 统一成 block 数组（Anthropic 两种形态都接受）。 */
+function toBlocks(content) {
+  if (content === null || content === undefined) return [];
+  if (typeof content === "string") {
+    return content === "" ? [] : [{ type: "text", text: content }];
+  }
+  if (Array.isArray(content)) return content;
+  return [{ type: "text", text: String(content) }];
+}
+
+/**
+ * OpenAI messages → Anthropic { system, messages }。
+ *
+ * @param {Array} openaiMessages
+ * @returns {{system: string, messages: Array}}
+ */
+function toAnthropicMessages(openaiMessages) {
+  const list = Array.isArray(openaiMessages) ? openaiMessages : [];
+  let system = "";
+  const raw = [];
+
+  for (const m of list) {
+    if (!m || typeof m !== "object") continue;
+
+    // system / developer 都提到顶层
+    if (m.role === "system" || m.role === "developer") {
+      const txt = typeof m.content === "string"
+        ? m.content
+        : toBlocks(m.content).map((b) => b.text ?? "").join("");
+      if (txt !== "") system += (system ? "\n\n" : "") + txt;
+      continue;
+    }
+
+    // tool 结果 → user + tool_result
+    if (m.role === "tool") {
+      raw.push({
+        role: "user",
+        content: [{
+          type: "tool_result",
+          tool_use_id: m.tool_call_id ?? "",
+          content: typeof m.content === "string" ? m.content : JSON.stringify(m.content ?? ""),
+        }],
+      });
+      continue;
+    }
+
+    // assistant 带 tool_calls → text block + tool_use blocks
+    if (m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length > 0) {
+      const blocks = [];
+      const txt = typeof m.content === "string" ? m.content : "";
+      if (txt !== "") blocks.push({ type: "text", text: txt });
+      for (const tc of m.tool_calls) {
+        const fn = tc?.function ?? {};
+        blocks.push({
+          type: "tool_use",
+          id: tc?.id ?? "",
+          name: fn.name ?? "",
+          input: safeJsonParse(fn.arguments ?? "{}", {}),
+        });
+      }
+      raw.push({ role: "assistant", content: blocks });
+      continue;
+    }
+
+    // 普通消息
+    raw.push({ role: m.role === "assistant" ? "assistant" : "user", content: toBlocks(m.content) });
+  }
+
+  // 合并相邻同 role（Anthropic 要求严格交替）
+  const merged = [];
+  for (const m of raw) {
+    const last = merged[merged.length - 1];
+    if (last && last.role === m.role) {
+      last.content = [...toBlocks(last.content), ...toBlocks(m.content)];
+    } else {
+      merged.push({ role: m.role, content: toBlocks(m.content) });
+    }
+  }
+
+  // Anthropic 不接受空 content
+  const cleaned = merged
+    .map((m) => ({ ...m, content: toBlocks(m.content) }))
+    .filter((m) => m.content.length > 0);
+
+  // 不能以 assistant 开头
+  while (cleaned.length > 0 && cleaned[0].role === "assistant") cleaned.shift();
+
+  // 全空时给个占位，否则上游 400
+  if (cleaned.length === 0) cleaned.push({ role: "user", content: [{ type: "text", text: "" }] });
+
+  return { system, messages: cleaned };
+}
+
+/**
+ * OpenAI tools → Anthropic tools。
+ * @param {Array|undefined} openaiTools
+ * @returns {Array|undefined}
+ */
+function toAnthropicTools(openaiTools) {
+  if (!Array.isArray(openaiTools) || openaiTools.length === 0) return undefined;
+  const out = [];
+  for (const t of openaiTools) {
+    const fn = t?.function;
+    if (!fn || typeof fn.name !== "string" || fn.name === "") continue;
+    out.push({
+      name: fn.name,
+      description: fn.description ?? "",
+      input_schema: fn.parameters ?? { type: "object", properties: {} },
+    });
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+/**
+ * OpenAI tool_choice → Anthropic tool_choice。
+ * @param {any} tc
+ * @returns {object|undefined}
+ */
+function toAnthropicToolChoice(tc) {
+  if (tc === null || tc === undefined) return undefined;
+  if (typeof tc === "string") {
+    if (tc === "auto") return { type: "auto" };
+    if (tc === "required") return { type: "any" };
+    // "none" 部分模型不支持，直接省略更安全
+    return undefined;
+  }
+  if (typeof tc === "object" && tc.type === "function" && tc.function?.name) {
+    return { type: "tool", name: tc.function.name };
+  }
+  return undefined;
+}
+
+/**
+ * Anthropic 响应 → OpenAI 响应。
+ *
+ * 关键：thinking block 必须丢弃，否则思考过程会被当正文返回给用户。
+ *
+ * @param {any} anth Anthropic /messages 的 JSON
+ * @param {string} requestedModel 调用方请求的模型名（原样回填）
+ * @returns {object} OpenAI chat.completion 结构
+ */
+function fromAnthropicResponse(anth, requestedModel) {
+  const blocks = Array.isArray(anth?.content) ? anth.content : [];
+
+  let text = "";
+  const toolCalls = [];
+  for (const b of blocks) {
+    if (!b || typeof b !== "object") continue;
+    if (b.type === "thinking" || b.type === "redacted_thinking") continue;  // ← 丢弃思考
+    if (b.type === "text") {
+      text += typeof b.text === "string" ? b.text : "";
+    } else if (b.type === "tool_use") {
+      toolCalls.push({
+        id: b.id ?? "",
+        type: "function",
+        function: {
+          name: b.name ?? "",
+          arguments: JSON.stringify(b.input ?? {}),
+        },
+      });
+    }
+  }
+
+  // 2026-11-21：只有 thinking、既无正文也无工具 → 视为失败。
+  //
+  // 典型场景：max_tokens 给小了，预算全被思考过程吃掉，
+  // 上游返回 stop_reason="max_tokens" 且 content 里只有 thinking block。
+  // 这种不能当成功（返回空正文会让上层以为模型没说话），
+  // 要明确判失败，好让轮换层换下一个目标。
+  if (text.trim() === "" && toolCalls.length === 0) {
+    const hasThinking = blocks.some(
+      (b) => b && (b.type === "thinking" || b.type === "redacted_thinking"),
+    );
+    if (hasThinking) return null;
+  }
+
+  const message = { role: "assistant", content: text };
+  if (toolCalls.length > 0) message.tool_calls = toolCalls;
+
+  // stop_reason → finish_reason（必须正确，否则 AstrBot 不知道要不要执行工具）
+  let finish = "stop";
+  const sr = anth?.stop_reason;
+  if (sr === "tool_use") finish = "tool_calls";
+  else if (sr === "max_tokens") finish = "length";
+  else if (sr === "end_turn" || sr === "stop_sequence") finish = "stop";
+  else if (sr === "refusal") finish = "content_filter";
+
+  const inTok = Number(anth?.usage?.input_tokens ?? 0) || 0;
+  const outTok = Number(anth?.usage?.output_tokens ?? 0) || 0;
+
+  return {
+    id: anth?.id ?? "",
+    object: "chat.completion",
+    created: Math.floor(Date.now() / 1000),
+    model: requestedModel,
+    choices: [{ index: 0, message, finish_reason: finish }],
+    usage: {
+      prompt_tokens: inTok,
+      completion_tokens: outTok,
+      total_tokens: inTok + outTok,
     },
-    body: JSON.stringify({ ...bodyObj, model: t.model }),
+  };
+}
+
+async function tryOne(t, bodyObj, signal) {
+  const useAnth = t.proto === "anthropic";
+  const url = t.base + (useAnth ? "/messages" : "/chat/completions");
+
+  const headers = { "Content-Type": "application/json" };
+  let body;
+
+  if (useAnth) {
+    // ── Anthropic Messages（2026-11-21）──
+    const { system, messages } = toAnthropicMessages(bodyObj.messages ?? []);
+    body = {
+      model: t.model,
+      // Anthropic 的 max_tokens 是必填，OpenAI 可省略
+      // 默认给 8192：Sage-A1.5 这类推理模型会先用掉大量 token 思考，
+      // 给 1024 的话预算全被 thinking 吃光，正文一个字都出不来。
+      max_tokens: Number(bodyObj.max_tokens ?? 0) > 0 ? Number(bodyObj.max_tokens) : 8192,
+      messages,
+    };
+    if (system !== "") body.system = system;
+    const tools = toAnthropicTools(bodyObj.tools);
+    if (tools) body.tools = tools;
+    const tc = toAnthropicToolChoice(bodyObj.tool_choice);
+    if (tc) body.tool_choice = tc;
+    if (bodyObj.temperature !== null && bodyObj.temperature !== undefined) {
+      body.temperature = bodyObj.temperature;
+    }
+    if (bodyObj.top_p !== null && bodyObj.top_p !== undefined) body.top_p = bodyObj.top_p;
+    if (bodyObj.stop !== null && bodyObj.stop !== undefined) {
+      // OpenAI 的 stop 可能是 string 或 array，Anthropic 只收 array
+      body.stop_sequences = Array.isArray(bodyObj.stop) ? bodyObj.stop : [bodyObj.stop];
+    }
+
+    // 某些网关只认 x-api-key，某些只认 Bearer —— 两个都发
+    headers["x-api-key"] = t.key;
+    headers["anthropic-version"] = "2023-06-01";
+    headers.Authorization = "Bearer " + t.key;
+  } else {
+    body = { ...bodyObj, model: t.model };
+    headers.Authorization = "Bearer " + t.key;
+  }
+
+  const upstream = await fetch(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
     signal,
   });
+
   if (!upstream.ok) {
     const text = (await upstream.text()).slice(0, 400);
-    return { ok: false, rateLimited: upstream.status === 429, status: upstream.status, detail: text };
+    return {
+      ok: false,
+      rateLimited: upstream.status === 429,
+      status: upstream.status,
+      detail: (useAnth ? "[anthropic] " : "") + text,
+    };
   }
+
   const text = await upstream.text();
   let payload;
   try {
     payload = JSON.parse(text);
   } catch {
+    console.error("[llm-pool][BADJSON] " + t.id + " 原文前400字: " + text.slice(0, 400));
     return { ok: false, rateLimited: false, status: 200, detail: "bad json" };
   }
+
+  // Anthropic 的响应要转成 OpenAI 结构，才能过 usable() 和后续处理
+  if (useAnth) {
+    // 上游可能用 error 字段表示业务错误（HTTP 200 但失败）
+    if (payload && typeof payload.type === "string" && payload.type === "error") {
+      return {
+        ok: false,
+        rateLimited: /rate.?limit|overloaded/i.test(String(payload.error?.type ?? "")),
+        status: 200,
+        detail: "[anthropic] " + String(payload.error?.message ?? "unknown error").slice(0, 300),
+      };
+    }
+    const converted = fromAnthropicResponse(payload, t.model);
+    if (converted === null) {
+      // 只有思考没有正文 —— 通常是 max_tokens 给小了
+      return {
+        ok: false,
+        rateLimited: false,
+        status: 200,
+        detail: "thinking only (max_tokens too small)",
+      };
+    }
+    payload = converted;
+  }
+
   if (!usable(payload)) {
     return { ok: false, rateLimited: false, status: 200, detail: "empty content" };
   }

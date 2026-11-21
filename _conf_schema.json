@@ -394,6 +394,13 @@
         "hint": "priority = 按优先级；roundrobin = 轮换均摊。",
         "obvious_hint": true
       },
+      "proto_map": {
+        "description": "协议（逐目标）",
+        "type": "string",
+        "default": "",
+        "hint": "给特定模型换协议。格式：目标id=anthropic，逗号分隔。留空全部走 OpenAI。",
+        "obvious_hint": true
+      },
       "priority": {
         "description": "优先级列表",
         "type": "list",

@@ -421,6 +421,36 @@ class ShimConnector(Star):
         section = self.config.get("llm_pool", {}) if isinstance(self.config, dict) else {}
         return self._as_str_list(section.get("priority"))
 
+    def _pool_proto_map(self) -> dict[str, str]:
+        """每个轮换目标该用哪种协议（2026-11-21 新增）。
+
+        背景：部分上游模型在 Anthropic Messages 协议下明显更快
+        （实测 Sage-A1.5 带 tools 从 6.3s 降到 0.63s）。
+        但大部分模型只支持 OpenAI Chat，所以必须逐目标配置，不能全局一刀切。
+
+        配置格式（插件配置 llm_pool.proto_map）：
+            "intern_source/Sage-A1.5=anthropic,intern_source/Sage-S2.1-Flash=anthropic"
+
+        Returns:
+            {"intern_source/Sage-A1.5": "anthropic", ...}；空配置返回 {}
+        """
+        section = self.config.get("llm_pool", {}) if isinstance(self.config, dict) else {}
+        raw = section.get("proto_map") or ""
+        if not isinstance(raw, str) or not raw.strip():
+            return {}
+        out: dict[str, str] = {}
+        for item in raw.split(","):
+            item = item.strip()
+            if not item or "=" not in item:
+                continue
+            k, v = item.split("=", 1)
+            k = k.strip()
+            v = v.strip().lower()
+            if not k or v not in ("openai", "anthropic"):
+                continue
+            out[k] = v
+        return out
+
     def _pool_fail_threshold(self) -> int:
         """llm_pool 的降级阈值：连续失败几次就排到最后。
 
@@ -1432,6 +1462,9 @@ class ShimConnector(Star):
             env["LLM_POOL_FAIL_PENALTY"] = str(pp["fail_penalty"])
             env["LLM_POOL_RECOVER_STEP"] = str(pp["recover_step"])
             env["LLM_POOL_INITIAL_SCORE"] = str(pp["initial_score"])
+            _proto = self._pool_proto_map()
+            if _proto:
+                env["LLM_POOL_PROTO"] = ",".join(f"{k}={v}" for k, v in _proto.items())
 
         # 父进程守护：shim 会监控这个 PID，AstrBot 死了它跟着退。
         #
